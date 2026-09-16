@@ -56,6 +56,15 @@ absl::Status ReadRate(const char* name, double& value) {
 
 absl::StatusOr<RuntimeConfig> RuntimeConfig::FromEnvironment() {
   RuntimeConfig config;
+  if (const char* value = std::getenv("PJRT_SIM_MAX_MATERIALIZED_BYTES")) {
+    if (!absl::SimpleAtoi(value, &config.max_materialized_bytes) ||
+        (config.max_materialized_bytes != 0 &&
+         config.max_materialized_bytes < 16)) {
+      return absl::InvalidArgumentError(
+          "PJRT_SIM_MAX_MATERIALIZED_BYTES must be 0 (disabled) or at least 16 "
+          "bytes");
+    }
+  }
   ABSL_RETURN_IF_ERROR(
       ReadScale("PJRT_SIM_COMPUTE_SCALE", config.compute_scale));
   ABSL_RETURN_IF_ERROR(
@@ -159,10 +168,27 @@ std::vector<Completion> SimRuntime::Execute(
     for (int dependency : node.dependencies)
       for (int d = 0; d < devices.size(); ++d)
         ready[d] = std::max(ready[d], ends[dependency][d]);
-    if ((node.kind == PlanNode::Kind::kAllReduce ||
-         node.kind == PlanNode::Kind::kAllGather ||
-         node.kind == PlanNode::Kind::kReduceScatter) &&
-        devices.size() > 1) {
+    if (node.kind == PlanNode::Kind::kTransfers) {
+      // Conservative group barrier over directed logical links. This models
+      // payload movement, not a calibrated physical TPU routing algorithm.
+      const int64_t release = *std::max_element(ready.begin(), ready.end());
+      int64_t end = release;
+      const int64_t duration = Duration(
+          config_.communication_scale *
+          (config_.link_ns / 1e9 + node.bytes / config_.link_bytes_per_second));
+      for (const auto& [source, target] : node.transfers) {
+        const int64_t src = devices[source], dst = devices[target];
+        const int64_t start =
+            Reserve(release, duration, {absl::StrCat("link:", src, ":", dst)});
+        end = std::max(end, start + duration);
+        profile.Interval(node.name, Epoch(start), Epoch(start + duration), src,
+                         "Communication", node.framework_op, {}, node.bytes);
+      }
+      std::fill(ready.begin(), ready.end(), end);
+    } else if ((node.kind == PlanNode::Kind::kAllReduce ||
+                node.kind == PlanNode::Kind::kAllGather ||
+                node.kind == PlanNode::Kind::kReduceScatter) &&
+               devices.size() > 1) {
       // Declared synthetic directed ring; no claim about a physical v7x slice.
       const int count = devices.size();
       int64_t round_start = *std::max_element(ready.begin(), ready.end());

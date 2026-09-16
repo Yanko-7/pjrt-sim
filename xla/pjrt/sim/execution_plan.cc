@@ -5,6 +5,7 @@
 #include "xla/pjrt/sim/execution_plan.h"
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <utility>
 
@@ -118,6 +119,7 @@ absl::Status EstimateNode(const HloInstruction& instruction, int64_t devices,
       instruction.custom_call_target() == "tpu_custom_call")
     return EstimatePallas(instruction, devices, local, node);
   if (opcode == HloOpcode::kParameter || opcode == HloOpcode::kConstant ||
+      opcode == HloOpcode::kPartitionId || opcode == HloOpcode::kReplicaId ||
       opcode == HloOpcode::kTuple || opcode == HloOpcode::kGetTupleElement ||
       opcode == HloOpcode::kBitcast || opcode == HloOpcode::kReshape ||
       Annotation(instruction)) {
@@ -133,8 +135,24 @@ absl::Status EstimateNode(const HloInstruction& instruction, int64_t devices,
     }
     return absl::OkStatus();
   }
+  if (opcode == HloOpcode::kCollectivePermute) {
+    if (!instruction.channel_id() || instruction.operand_count() != 1)
+      return absl::UnimplementedError("unsupported collective-permute scope");
+    std::vector<bool> sources(devices), targets(devices);
+    for (const auto& [source, target] : instruction.source_target_pairs()) {
+      if (source < 0 || target < 0 || source >= devices || target >= devices ||
+          sources[source] || targets[target])
+        return absl::UnimplementedError("unsupported collective-permute pairs");
+      sources[source] = targets[target] = true;
+      if (source != target) node.transfers.emplace_back(source, target);
+    }
+    ABSL_ASSIGN_OR_RETURN(node.bytes,
+                          Bytes(*instruction.operand(0), devices, local));
+    node.kind = PlanNode::Kind::kTransfers;
+    return absl::OkStatus();
+  }
   if (opcode == HloOpcode::kAllReduce || opcode == HloOpcode::kAllGather ||
-      opcode == HloOpcode::kReduceScatter) {
+      opcode == HloOpcode::kReduceScatter || opcode == HloOpcode::kAllToAll) {
     // With one replica, a channel identifies a partition collective. Only a
     // single full identity group is modeled; other groups remain coverage gaps.
     if (!instruction.channel_id().has_value() ||
@@ -148,6 +166,14 @@ absl::Status EstimateNode(const HloInstruction& instruction, int64_t devices,
         return absl::UnimplementedError("non-identity collective group");
     ABSL_ASSIGN_OR_RETURN(node.bytes,
                           Bytes(*instruction.operand(0), devices, local));
+    if (opcode == HloOpcode::kAllToAll) {
+      node.kind = PlanNode::Kind::kTransfers;
+      node.bytes = std::ceil(node.bytes / devices);
+      for (int source = 0; source < devices; ++source)
+        for (int target = 0; target < devices; ++target)
+          if (source != target) node.transfers.emplace_back(source, target);
+      return absl::OkStatus();
+    }
     node.kind = opcode == HloOpcode::kAllReduce ? PlanNode::Kind::kAllReduce
                 : opcode == HloOpcode::kAllGather
                     ? PlanNode::Kind::kAllGather
@@ -257,8 +283,8 @@ class Builder {
     return Add(std::move(done));
   }
 
-  ExecutionPlan Build(const HloModule& module) {
-    plan_.root = Computation(*module.entry_computation(), false, {});
+  ExecutionPlan Build(const HloModule& module, bool partitioned) {
+    plan_.root = Computation(*module.entry_computation(), partitioned, {});
     return std::move(plan_);
   }
 
@@ -273,8 +299,9 @@ class Builder {
 
 }  // namespace
 
-ExecutionPlan BuildExecutionPlan(const HloModule& module, int64_t devices) {
-  return Builder(devices).Build(module);
+ExecutionPlan BuildExecutionPlan(const HloModule& module, int64_t devices,
+                                 bool partitioned) {
+  return Builder(devices).Build(module, partitioned);
 }
 
 }  // namespace xla::sim

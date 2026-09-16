@@ -24,6 +24,7 @@ limitations under the License.
 #include "xla/pjrt/c/pjrt_c_api_status_utils.h"
 #include "xla/pjrt/c/pjrt_c_api_wrapper_impl.h"
 #include "xla/pjrt/sim/profiler.h"
+#include "xla/pjrt/sim/virtual_storage.h"
 #include "tsl/platform/env.h"
 
 namespace xla::sim {
@@ -122,7 +123,7 @@ void ProfileBuffer(const ProfileActivity& activity, PJRT_Buffer* buffer,
 
 PJRT_Error* FromHost(PJRT_Client_BufferFromHostBuffer_Args* args) {
   ProfileCall profile("PJRT H2D submit");
-  PJRT_Error* error = pjrt::PJRT_Client_BufferFromHostBuffer(args);
+  PJRT_Error* error = VirtualFromHost(args, MaxMaterializedBytes(args->client));
   if (!error) {
     Track(args->buffer);
     TransferBuffer(args->buffer, -1, {}, profile.activity());
@@ -190,12 +191,14 @@ PJRT_Error* CopyToDevice(PJRT_Buffer_CopyToDevice_Args* args) {
 }
 
 PJRT_Error* UnsafePointer(PJRT_Buffer_UnsafePointer_Args* args) {
+  PJRT_RETURN_IF_ERROR(CheckMaterialized(args->buffer->buffer.get()));
   PJRT_RETURN_IF_ERROR(BufferReady(args->buffer).Await());
   return pjrt::PJRT_Buffer_UnsafePointer(args);
 }
 
 PJRT_Error* OpaquePointer(
     PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args* args) {
+  PJRT_RETURN_IF_ERROR(CheckMaterialized(args->buffer->buffer.get()));
   PJRT_RETURN_IF_ERROR(BufferReady(args->buffer).Await());
   return pjrt::PJRT_Buffer_OpaqueDeviceMemoryDataPointer(args);
 }
@@ -215,6 +218,7 @@ PJRT_Error* DestroyClient(PJRT_Client_Destroy_Args* args) {
 }
 
 PJRT_Error* ToHost(PJRT_Buffer_ToHostBuffer_Args* args) {
+  PJRT_RETURN_IF_ERROR(CheckMaterialized(args->src->buffer.get()));
   ProfileCall profile(args->dst ? "PJRT D2H submit" : "PJRT D2H size query");
   ProfileBuffer(profile.activity(), args->src);
   PJRT_Error* error = pjrt::PJRT_Buffer_ToHostBuffer(args);
@@ -265,6 +269,7 @@ PJRT_Error* ExternalReference(
   // is not a TPU D2H transfer and must be named separately in the profile.
   ProfileCall profile("PJRT buffer external reference");
   ProfileBuffer(profile.activity(), args->buffer);
+  PJRT_RETURN_IF_ERROR(CheckMaterialized(args->buffer->buffer.get()));
   PJRT_RETURN_IF_ERROR(BufferReady(args->buffer).Await());
   return pjrt::PJRT_Buffer_IncreaseExternalReferenceCount(args);
 }
@@ -474,8 +479,9 @@ PJRT_Error* Execute(PJRT_LoadedExecutable_Execute_Args* args) {
                   << ",\"num_partitions\":" << work.num_partitions
                   << ",\"program_id\":" << work.program_id
                   << ",\"correlation_id\":"
-                  << profile.activity().correlation_id()
-                  << ",\"work_scope\":\"pre_partition\""
+                  << profile.activity().correlation_id() << ",\"work_scope\":"
+                  << std::quoted(work.partitioned ? "per_partition"
+                                                  : "pre_partition")
                   << ",\"dot_flops\":" << work.dot_flops
                   << ",\"logical_bytes\":" << work.logical_bytes
                   << ",\"substituted_ops\":" << work.substituted_ops
@@ -500,6 +506,11 @@ PJRT_Error* DestroyExecutable(PJRT_LoadedExecutable_Destroy_Args* args) {
 }
 
 }  // namespace
+
+int64_t MaxMaterializedBytes(PJRT_Client* client) {
+  auto runtime = Runtime(client);
+  return runtime ? runtime->max_materialized_bytes() : 0;
+}
 
 void RegisterWork(PJRT_LoadedExecutable* executable, WorkEstimate work) {
   std::lock_guard<std::mutex> lock(State().mutex);

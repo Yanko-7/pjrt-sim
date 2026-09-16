@@ -64,6 +64,7 @@ xla_cc_test(
     srcs = ["instrumentation_test.cc", "instrumentation.cc", "instrumentation.h"],
     deps = [
         ":hlo_model",
+        ":virtual_storage",
         ":runtime",
         ":profiler",
         "//xla/pjrt/c:pjrt_c_api_cpu_internal",
@@ -102,8 +103,10 @@ xla_cc_binary(
     deps = [
         "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
         ":hlo_model",
+        ":virtual_storage",
         ":runtime",
         ":profiler",
+        ":partitioning",
         "//xla/backends/profiler/plugin:profiler_error",
         "//xla/hlo/builder:xla_computation",
         "//xla/hlo/ir:hlo",
@@ -180,5 +183,60 @@ xla_cc_test(
         "//xla/hlo/parser:hlo_parser",
         "@com_google_googletest//:gtest_main",
         "@tsl//tsl/platform:status_matchers",
+    ],
+)
+
+cc_library(
+    name = "virtual_storage",
+    srcs = ["virtual_storage.cc"],
+    hdrs = ["virtual_storage.h"],
+    deps = [
+        "//xla:literal_util",
+        "//xla:shape_util",
+        "//xla/hlo/ir:hlo",
+        "//xla/hlo/builder:xla_computation",
+        "//xla/pjrt:pjrt_client",
+        "//xla/pjrt/c:pjrt_c_api_helpers",
+        "//xla/pjrt/c:pjrt_c_api_status_utils",
+        "//xla/pjrt/c:pjrt_c_api_wrapper_impl",
+        "//xla/service:computation_layout",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+xla_cc_test(
+    name = "virtual_storage_test",
+    srcs = ["virtual_storage_test.cc"],
+    deps = [
+        ":virtual_storage",
+        "//xla/hlo/parser:hlo_parser",
+        "//xla/hlo/ir:hlo",
+        "//xla/service:hlo_verifier",
+        "@com_google_absl//absl/status",
+        "@com_google_googletest//:gtest_main",
+        "@tsl//tsl/platform:status_matchers",
+    ],
+)
+
+cc_library(
+    name = "partitioning",
+    srcs = ["partitioning.cc"],
+    hdrs = ["partitioning.h"],
+    deps = [
+        "//xla/hlo/ir:hlo",
+        "//xla/pjrt:pjrt_client",
+        "//xla/hlo/transforms/simplifiers:conditional_canonicalizer",
+        "//xla/hlo/transforms/simplifiers:flatten_call_graph",
+        "//xla/hlo/transforms/simplifiers:zero_sized_hlo_elimination",
+        "//xla/service:call_inliner",
+        "//xla/service:control_dep_rewriter",
+        "//xla/service:sharding_propagation",
+        "//xla/service/spmd:stateful_rng_spmd_partitioner",
+        "//xla/service/spmd/shardy:shardy_xla_pass",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
     ],
 )

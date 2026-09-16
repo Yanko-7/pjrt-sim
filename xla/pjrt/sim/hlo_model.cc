@@ -141,7 +141,27 @@ absl::StatusOr<WorkEstimate> PrepareForSimulation(HloModule& module,
                 ? std::max<int64_t>(0, analysis.flop_count(*instruction))
                 : 0,
             ",\"logical_bytes\":",
-            std::max<int64_t>(0, analysis.bytes_accessed(*instruction)), "}");
+            std::max<int64_t>(0, analysis.bytes_accessed(*instruction)));
+        const HloOpcode opcode = instruction->opcode();
+        if (opcode == HloOpcode::kAllReduce ||
+            opcode == HloOpcode::kAllGather ||
+            opcode == HloOpcode::kReduceScatter ||
+            opcode == HloOpcode::kAllToAll) {
+          // Normalize compact XLA device lists for the standalone replay
+          // reader.
+          absl::StrAppend(&estimate.program_json, ",\"collective_groups\":[");
+          bool first_group = true;
+          for (const ReplicaGroup& group : instruction->replica_groups()) {
+            absl::StrAppend(&estimate.program_json, first_group ? "[" : ",[");
+            for (int i = 0; i < group.replica_ids_size(); ++i)
+              absl::StrAppend(&estimate.program_json, i ? "," : "",
+                              group.replica_ids(i));
+            absl::StrAppend(&estimate.program_json, "]");
+            first_group = false;
+          }
+          absl::StrAppend(&estimate.program_json, "]");
+        }
+        absl::StrAppend(&estimate.program_json, "}");
         first = false;
       }
     }

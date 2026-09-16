@@ -23,6 +23,8 @@
 namespace xla::sim {
 
 struct RuntimeConfig {
+  // Opt-in per-array host storage limit; zero preserves CPU storage.
+  int64_t max_materialized_bytes = 0;
   // Hypothetical per-chiplet rates, not calibrated TPU measurements.
   double flops_per_second = 1.1535e15;
   double transcendentals_per_second = 1e12;
@@ -47,6 +49,9 @@ struct Completion {
 class SimRuntime {
  public:
   explicit SimRuntime(RuntimeConfig config);
+  int64_t max_materialized_bytes() const {
+    return config_.max_materialized_bytes;
+  }
   ~SimRuntime();
   SimRuntime(const SimRuntime&) = delete;
   SimRuntime& operator=(const SimRuntime&) = delete;

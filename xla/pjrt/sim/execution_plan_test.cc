@@ -162,5 +162,54 @@ ENTRY main {
   EXPECT_EQ(plan.cost_gaps, 0);
 }
 
+TEST(ExecutionPlanTest, PartitionedDotUsesLocalShapesAndExplicitCommunication) {
+  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(R"(
+HloModule local
+sum {
+  x = bf16[] parameter(0)
+  y = bf16[] parameter(1)
+  ROOT z = bf16[] add(x,y)
+}
+ENTRY main {
+  x = bf16[8,8] parameter(0)
+  w = bf16[8,4] parameter(1)
+  dot = bf16[8,4] dot(x,w), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  ROOT reduced = bf16[8,4] all-reduce(dot), replica_groups={{0,1}}, channel_id=1, use_global_device_ids=true, to_apply=sum
+})"));
+  ExecutionPlan plan = BuildExecutionPlan(*module, 2, true);
+  EXPECT_EQ(plan.cost_gaps, 0);
+  double flops = 0, bytes = 0;
+  int collectives = 0;
+  for (const PlanNode& node : plan.nodes) {
+    flops += node.flops;
+    if (node.kind == PlanNode::Kind::kAllReduce) {
+      ++collectives;
+      bytes += node.bytes;
+    }
+  }
+  EXPECT_EQ(flops, 512);
+  EXPECT_EQ(collectives, 1);
+  EXPECT_EQ(bytes, 64);
+}
+
+TEST(ExecutionPlanTest, ReshardTransfersUseLocalPayloads) {
+  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(R"(
+HloModule transfers
+ENTRY main {
+  x = f32[8,8] parameter(0)
+  exchange = f32[8,8] all-to-all(x), dimensions={0}, replica_groups={{0,1}}, channel_id=1
+  ROOT rotate = f32[8,8] collective-permute(exchange), source_target_pairs={{0,1},{1,0}}, channel_id=2
+})"));
+  ExecutionPlan plan = BuildExecutionPlan(*module, 2, true);
+  EXPECT_EQ(plan.cost_gaps, 0);
+  int count = 0;
+  for (const PlanNode& node : plan.nodes) {
+    if (node.kind != PlanNode::Kind::kTransfers) continue;
+    EXPECT_EQ(node.transfers.size(), 2);
+    EXPECT_EQ(node.bytes, count++ == 0 ? 128 : 256);
+  }
+  EXPECT_EQ(count, 2);
+}
+
 }  // namespace
 }  // namespace xla::sim

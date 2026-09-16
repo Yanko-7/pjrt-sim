@@ -26,6 +26,7 @@ namespace xla::sim {
 // HBM traffic. Opaque kernels and dynamic control flow make timing incomplete.
 struct WorkEstimate {
   std::shared_ptr<const ExecutionPlan> plan;
+  bool partitioned = false;  // Work uses local shapes after SPMD partitioning.
   double dot_flops = 0;
   double logical_bytes = 0;
   int64_t substituted_ops = 0;

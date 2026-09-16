@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "xla/hlo/ir/hlo_module.h"
@@ -21,7 +22,8 @@ struct PlanNode {
     kCompute,
     kAllReduce,
     kAllGather,
-    kReduceScatter
+    kReduceScatter,
+    kTransfers
   };
   std::string name;
   std::string framework_op;
@@ -29,6 +31,8 @@ struct PlanNode {
   std::string cost_source;
   Kind kind = Kind::kBarrier;
   std::vector<int> dependencies;
+  // Directed executable-local device pairs; bytes is the payload per pair.
+  std::vector<std::pair<int, int>> transfers;
   double flops = 0;
   double transcendentals = 0;
   double bytes = 0;
@@ -42,7 +46,10 @@ struct ExecutionPlan {
 
 // Intentionally limited to uniform sharding and static calls. Unsupported work
 // preserves dependencies and is explicitly marked, never divided by TP blindly.
-ExecutionPlan BuildExecutionPlan(const HloModule& module, int64_t devices);
+// partitioned means shapes already describe one device; do not divide them
+// again.
+ExecutionPlan BuildExecutionPlan(const HloModule& module, int64_t devices,
+                                 bool partitioned = false);
 
 }  // namespace xla::sim
 #endif  // XLA_PJRT_SIM_EXECUTION_PLAN_H_

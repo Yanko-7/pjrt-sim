@@ -11,7 +11,7 @@ limitations under the License.
 ==============================================================================*/
 // A C API adapter over the CPU functional backend. Ownership and numerical
 // control semantics remain upstream; SimRuntime gates public readiness using
-// original-HLO work estimates. CPU memory is physically allocated.
+// original-HLO work estimates. Optional virtual storage bounds large arrays.
 #include <array>
 #include <cstdlib>
 #include <memory>
@@ -36,7 +36,9 @@ limitations under the License.
 #include "xla/pjrt/proto/compile_options.pb.h"
 #include "xla/pjrt/sim/hlo_model.h"
 #include "xla/pjrt/sim/instrumentation.h"
+#include "xla/pjrt/sim/partitioning.h"
 #include "xla/pjrt/sim/profiler.h"
+#include "xla/pjrt/sim/virtual_storage.h"
 
 namespace xla::sim {
 namespace {
@@ -179,14 +181,27 @@ absl::StatusOr<std::unique_ptr<PjRtLoadedExecutable>> CompileProgram(
   ABSL_ASSIGN_OR_RETURN(
       std::unique_ptr<HloModule> module,
       HloModule::CreateFromProto(computation.proto(), config));
+  const int64_t storage_limit = MaxMaterializedBytes(args->client);
+  const bool partitioned = storage_limit > 0 && build.num_partitions() > 1;
+  if (partitioned) {
+    ABSL_RETURN_IF_ERROR(PartitionForVirtualStorage(*module, options));
+  }
   auto plan = std::make_shared<ExecutionPlan>(
-      BuildExecutionPlan(*module, build.num_partitions()));
+      BuildExecutionPlan(*module, build.num_partitions(), partitioned));
   ABSL_ASSIGN_OR_RETURN(
       work,
       PrepareForSimulation(*module, std::getenv("PJRT_SIM_TRACE") != nullptr));
+  work.partitioned = partitioned;
+  if (partitioned && !work.program_json.empty()) {
+    work.program_json.insert(1, "\"shape_scope\":\"per_partition\",");
+  }
   work.num_replicas = build.num_replicas();
   work.plan = std::move(plan);
   work.num_partitions = build.num_partitions();
+  if (storage_limit > 0) {
+    return CompileVirtual(args->client->client.get(), std::move(module),
+                          std::move(options), storage_limit);
+  }
   return args->client->client->CompileAndLoad(XlaComputation(module->ToProto()),
                                               std::move(options));
 }

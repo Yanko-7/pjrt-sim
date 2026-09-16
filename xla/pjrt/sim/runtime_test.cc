@@ -107,5 +107,26 @@ TEST(RuntimeTest, ClientDestructionCancelsOutstandingNotifications) {
   EXPECT_EQ(transfer.future.Await().code(), absl::StatusCode::kCancelled);
 }
 
+TEST(RuntimeTest, DirectedTransfersBindPartitionOrdinalsToDevices) {
+  RuntimeConfig config;
+  config.launch_ns = 0;
+  config.transfer_ns = 50000000;
+  config.link_ns = 10000000;
+  config.link_bytes_per_second = 1000;
+  SimRuntime runtime(config);
+  Completion input = runtime.Transfer(-1, 7, 0, {}, {});
+  ExecutionPlan plan;
+  PlanNode node;
+  node.kind = PlanNode::Kind::kTransfers;
+  node.transfers = {{0, 1}, {1, 0}};
+  node.bytes = 10;
+  plan.nodes.push_back(node);
+  plan.root = 0;
+  auto outputs = runtime.Execute(plan, {7, 3}, {input}, {}, "reshard");
+  EXPECT_EQ(outputs[0].end_ns, input.end_ns + 20000000);
+  EXPECT_EQ(outputs[0].end_ns, outputs[1].end_ns);
+  EXPECT_OK(outputs[0].future.Await());
+}
+
 }  // namespace
 }  // namespace xla::sim
