@@ -151,3 +151,38 @@ Final TP-8 capture after profiler metadata cleanup: 11 requests passed,
 159192 simulated events and 248 model execution scopes. Raw XSpace retains
 `program_id`; `sim_program_id` exposes it in Trace Viewer. The verified native
 file is `/tmp/pjrt-sim-sglang-online-profile/plugins/profile/2026_09_15_06_06_43/282a0f599647.xplane.pb` (35.40 MiB) in the shared workspace.
+
+## Declared Pallas costs (2026-09-15)
+
+The online plan and offline replay now consume the existing
+`custom_call_config.cost_estimate` contract. JAX FlashAttention supplies FLOPs,
+transcendentals and bytes accessed. A three-component roofline feeds existing
+compute/HBM reservations and completion gates. Profiles and load reports keep
+kernel counts separate from ordinary dots; execution traces expose per-device
+kernel totals. No numerical semantics changed. Missing estimates, unsupported
+scope and internal communication remain explicit gaps.
+
+Validation used a fresh local Bazel build and an isolated Python 3.13 environment
+at `/tmp/pjrt-sim-validation`, with JAX/jaxlib 0.11.1 and XProf 2.23.1. The old
+`xla` container and pinned SGLang source directory were absent on this machine.
+
+- Five C++ targets (28 cases) pass, covering costs, scope, call multiplicity,
+  invalid metadata, completion, profiler fields and existing runtime contracts.
+- 29 Python lowering/replay/report/export tests pass; dependency checks pass.
+- JAX online readiness, sensitivity, smoke and native Pallas/FlashAttention
+  tests pass. Multi-device runtime tests pass for 2, 4 and 8 devices.
+- With compute scale 100000, lowering transcendental throughput from 1e12 to
+  1e11 changed Pallas completion from 20.19 ms to 200.20 ms; ordinary dot and
+  communication remained near 21.6 ms and 20.3 ms. These are gate-sensitivity
+  checks, not TPU measurements.
+- A real FlashAttention invocation produced matching online/replay intervals
+  (72 ns under the default hypothetical rates), 16,842,752 kernel FLOPs,
+  32,768 transcendentals and 262,144 bytes. Exact counts were checked in raw
+  XSpace as well as execution JSONL; Trace Viewer rounds displayed doubles.
+  Artifacts are in `/tmp/pjrt-sim-attention-native`.
+
+The full SGLang request matrix was not rerun. Virtual-time-driven serving,
+paged/ragged attention without declared costs, communication/memory extensions
+and TPU calibration remain unfinished; see `PERFORMANCE_PLAN.md`. No Falcon
+experiment was submitted; hardware/cluster or an existing experiment ID is
+still needed for calibration.

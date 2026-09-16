@@ -44,6 +44,14 @@ absl::Status ReadLatency(const char* name, int64_t& value) {
         absl::StrCat(name, " must be in [0, 1000000000] ns"));
   return absl::OkStatus();
 }
+absl::Status ReadRate(const char* name, double& value) {
+  const char* text = std::getenv(name);
+  if (text && (!absl::SimpleAtod(text, &value) || !std::isfinite(value) ||
+               value <= 0 || value > 1e30))
+    return absl::InvalidArgumentError(
+        absl::StrCat(name, " must be in (0, 1e30]"));
+  return absl::OkStatus();
+}
 }  // namespace
 
 absl::StatusOr<RuntimeConfig> RuntimeConfig::FromEnvironment() {
@@ -55,6 +63,16 @@ absl::StatusOr<RuntimeConfig> RuntimeConfig::FromEnvironment() {
   ABSL_RETURN_IF_ERROR(ReadLatency("PJRT_SIM_LAUNCH_NS", config.launch_ns));
   ABSL_RETURN_IF_ERROR(ReadLatency("PJRT_SIM_TRANSFER_NS", config.transfer_ns));
   ABSL_RETURN_IF_ERROR(ReadLatency("PJRT_SIM_LINK_NS", config.link_ns));
+  ABSL_RETURN_IF_ERROR(
+      ReadRate("PJRT_SIM_FLOPS_PER_SECOND", config.flops_per_second));
+  ABSL_RETURN_IF_ERROR(ReadRate("PJRT_SIM_TRANSCENDENTALS_PER_SECOND",
+                                config.transcendentals_per_second));
+  ABSL_RETURN_IF_ERROR(
+      ReadRate("PJRT_SIM_HBM_BYTES_PER_SECOND", config.hbm_bytes_per_second));
+  ABSL_RETURN_IF_ERROR(
+      ReadRate("PJRT_SIM_HOST_BYTES_PER_SECOND", config.host_bytes_per_second));
+  ABSL_RETURN_IF_ERROR(
+      ReadRate("PJRT_SIM_LINK_BYTES_PER_SECOND", config.link_bytes_per_second));
   return config;
 }
 
@@ -174,8 +192,10 @@ std::vector<Completion> SimRuntime::Execute(
           node.kind != PlanNode::Kind::kCompute
               ? 0
               : Duration(config_.compute_scale *
-                         std::max(node.flops / config_.flops_per_second,
-                                  node.bytes / config_.hbm_bytes_per_second));
+                         std::max({node.flops / config_.flops_per_second,
+                                   node.transcendentals /
+                                       config_.transcendentals_per_second,
+                                   node.bytes / config_.hbm_bytes_per_second}));
       for (int d = 0; d < devices.size(); ++d) {
         const int64_t device = devices[d];
         const int64_t start = Reserve(
@@ -184,7 +204,7 @@ std::vector<Completion> SimRuntime::Execute(
         ready[d] = start + duration;
         profile.Interval(node.name, Epoch(start), Epoch(ready[d]), device,
                          "HLO", node.framework_op, node.cost_gap, node.bytes,
-                         node.flops);
+                         node.flops, node.transcendentals, node.cost_source);
       }
     }
     ends.push_back(std::move(ready));

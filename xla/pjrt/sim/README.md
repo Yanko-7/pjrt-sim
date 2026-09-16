@@ -166,12 +166,65 @@ resources. Submissions use a conservative FIFO reservation policy; each program
 waits for all its inputs and the previous execution on its participating devices.
 This is not a physical v7x topology or an optimized TPU instruction schedule.
 
-Opaque Pallas kernels, dynamic control flow, unsupported sharding and general
+Pallas kernels without usable declared costs, dynamic control flow, unsupported sharding and general
 resharding remain explicit cost gaps with dependency-only nodes. CPU execution
 may run ahead internally; public readiness is gated by both model and CPU.
 Actual Host scheduling, CPU functional execution and callback overhead still
 influence request time. This version advances at real time, not an accelerated
 global virtual clock, and its request latency is not a calibrated TPU prediction.
+
+### Declared Pallas costs
+
+The online plan and Python replay read
+`custom_call_config.cost_estimate` from a `tpu_custom_call` backend config.
+JAX 0.11.1 TPU FlashAttention supplies `flops`, `transcendentals`, and
+`bytes_accessed`. Costs apply once per local invocation, including each static
+call site; they are never divided by TP. Supported scopes are one device, a
+manual/local computation, or explicitly replicated inputs and output.
+
+The kernel duration is the maximum of three component times:
+
+```text
+max(flops / compute_rate,
+    transcendentals / transcendental_rate,
+    bytes_accessed / hbm_rate)
+```
+
+Online `PJRT_SIM_COMPUTE_SCALE` multiplies this duration. Compute and HBM are
+reserved for the whole interval, as for other modeled computation. A separate
+transcendental rate accounts for operations such as attention's exponential;
+this is an uncalibrated roofline approximation, not an instruction schedule.
+
+Rate overrides are positive finite values, at most 1e30:
+
+| Environment variable | Default |
+| --- | --- |
+| `PJRT_SIM_FLOPS_PER_SECOND` | 1.1535e15 |
+| `PJRT_SIM_TRANSCENDENTALS_PER_SECOND` | 1e12 |
+| `PJRT_SIM_HBM_BYTES_PER_SECOND` | 3.69e12 |
+| `PJRT_SIM_HOST_BYTES_PER_SECOND` | 32e9 |
+| `PJRT_SIM_LINK_BYTES_PER_SECOND` | 1e11 |
+
+Offline scenarios use `transcendentals_per_second` (default 1e12) alongside
+their existing compute and memory rates. Online overrides do not change an
+offline scenario.
+
+Profiles label these nodes `cost_source=pallas_cost_estimate` and expose
+`kernel_flops` and `transcendentals` separately from ordinary `dot_flops`.
+Execution JSONL adds per-device `kernel_flops`, `kernel_transcendentals`,
+`kernel_bytes_accessed` and `plan_cost_gaps`. Device-load reports include
+separate kernel totals: the author supplies total bytes, not a read/write split.
+The older aggregate `unmodeled_ops` and `report.py` remain the legacy HLO-only
+estimate; use the online profile or `replay.py` for declared kernel costs.
+
+Missing/malformed estimates, uncertain partitioning, and kernels with internal
+communication retain explicit cost gaps. No kernel-name inference is used.
+Declared counts need not reflect active KV lengths, tiling reloads, causal tile
+skipping or actual HBM traffic. This does not yet cover arbitrary paged/ragged
+attention without metadata, and it does not interpret the Mosaic body.
+
+See [the iteration plan](PERFORMANCE_PLAN.md) for the remaining scheduling,
+communication, memory and hardware calibration work.
 
 ## XProf profiling
 

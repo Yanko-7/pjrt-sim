@@ -14,6 +14,7 @@
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/pjrt/sim/pallas_cost.h"
 #include "xla/shape_util.h"
 
 namespace xla::sim {
@@ -113,6 +114,9 @@ bool MemoryOperation(const HloInstruction& instruction) {
 absl::Status EstimateNode(const HloInstruction& instruction, int64_t devices,
                           bool local, PlanNode& node, bool& reduce) {
   const HloOpcode opcode = instruction.opcode();
+  if (opcode == HloOpcode::kCustomCall &&
+      instruction.custom_call_target() == "tpu_custom_call")
+    return EstimatePallas(instruction, devices, local, node);
   if (opcode == HloOpcode::kParameter || opcode == HloOpcode::kConstant ||
       opcode == HloOpcode::kTuple || opcode == HloOpcode::kGetTupleElement ||
       opcode == HloOpcode::kBitcast || opcode == HloOpcode::kReshape ||
@@ -225,7 +229,8 @@ class Builder {
             EstimateNode(*instruction, devices_, local, node, reduce);
         if (!status.ok()) {
           node.cost_gap = std::string(status.message());
-          node.bytes = node.flops = 0;
+          node.bytes = node.flops = node.transcendentals = 0;
+          node.cost_source.clear();
           node.kind = PlanNode::Kind::kBarrier;
           reduce = false;
           ++plan_.cost_gaps;

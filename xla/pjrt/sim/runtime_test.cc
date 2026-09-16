@@ -71,6 +71,21 @@ TEST(RuntimeTest, CpuReadinessAndErrorsAreNotHiddenByModeledCompletion) {
   EXPECT_EQ(ready.Await().code(), absl::StatusCode::kInternal);
 }
 
+TEST(RuntimeTest, PallasTranscendentalsCanLimitCompletion) {
+  RuntimeConfig config;
+  config.launch_ns = 0;
+  config.transcendentals_per_second = 1000;
+  SimRuntime runtime(config);
+  // The predecessor is in the future, so wall-clock submission jitter cannot
+  // change the exact modeled difference checked below.
+  ExecutionPlan plan = ComputePlan(0);
+  plan.nodes[0].transcendentals = 100;
+  auto first = runtime.Execute(plan, {0}, {}, {}, "attention");
+  auto second = runtime.Execute(plan, {0}, first, {}, "attention");
+  EXPECT_EQ(second[0].end_ns - first[0].end_ns, 100000000);
+  EXPECT_OK(second[0].future.Await());
+}
+
 TEST(RuntimeTest, CallbackCanSubmitAndWaitWithoutBlockingTimerWorker) {
   SimRuntime runtime(RuntimeConfig{});
   auto [promise, done] = MakePromise();

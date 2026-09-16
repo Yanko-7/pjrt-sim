@@ -459,6 +459,13 @@ PJRT_Error* Execute(PJRT_LoadedExecutable_Execute_Args* args) {
   }
   if (it != State().work.end() && State().trace.is_open()) {
     const WorkEstimate& work = it->second;
+    double kernel_flops = 0, kernel_transcendentals = 0, kernel_bytes = 0;
+    for (const PlanNode& node : work.plan->nodes) {
+      if (node.cost_source != "pallas_cost_estimate") continue;
+      kernel_flops += node.flops;
+      kernel_transcendentals += node.transcendentals;
+      kernel_bytes += node.bytes;
+    }
     State().trace << std::setprecision(17)
                   << "{\"sequence\":" << State().sequence++ << ",\"name\":"
                   << std::quoted(std::string(args->executable->get()->name()))
@@ -472,7 +479,12 @@ PJRT_Error* Execute(PJRT_LoadedExecutable_Execute_Args* args) {
                   << ",\"dot_flops\":" << work.dot_flops
                   << ",\"logical_bytes\":" << work.logical_bytes
                   << ",\"substituted_ops\":" << work.substituted_ops
-                  << ",\"unmodeled_ops\":" << work.unmodeled_ops << "}\n";
+                  << ",\"unmodeled_ops\":" << work.unmodeled_ops
+                  << ",\"plan_cost_gaps\":" << work.plan->cost_gaps
+                  << ",\"kernel_cost_scope\":\"per_device\""
+                  << ",\"kernel_flops\":" << kernel_flops
+                  << ",\"kernel_transcendentals\":" << kernel_transcendentals
+                  << ",\"kernel_bytes_accessed\":" << kernel_bytes << "}\n";
     State().trace.flush();
     if (!State().trace) LOG(ERROR) << "Failed to write PJRT_SIM_TRACE";
   }

@@ -22,6 +22,53 @@ limitations under the License.
 namespace xla::sim {
 namespace {
 using tensorflow::profiler::XSpace;
+TEST(ProfilerTest, DeclaredKernelCostsAreSeparateFromDotFlops) {
+  ASSERT_OK_AND_ASSIGN(auto session, StartProfile());
+  const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+  ProfileCall call("submit");
+  call.activity().Interval("attention", now, now, 0, "HLO", {}, {}, 160, 800,
+                           40, "pallas_cost_estimate");
+  StopProfile(session);
+  XSpace space;
+  ASSERT_TRUE(space.ParseFromString(session->Serialize()));
+  int kernels = 0;
+  for (const auto& plane : space.planes()) {
+    for (const auto& line : plane.lines()) {
+      for (const auto& event : line.events()) {
+        if (plane.event_metadata().at(event.metadata_id()).name() !=
+            "attention")
+          continue;
+        ++kernels;
+        int checked = 0;
+        for (const auto& stat : event.stats()) {
+          const auto& name =
+              plane.stat_metadata().at(stat.metadata_id()).name();
+          if (name == "kernel_flops") {
+            EXPECT_EQ(stat.double_value(), 800);
+            ++checked;
+          }
+          if (name == "dot_flops") {
+            EXPECT_EQ(stat.double_value(), 0);
+            ++checked;
+          }
+          if (name == "transcendentals") {
+            EXPECT_EQ(stat.double_value(), 40);
+            ++checked;
+          }
+          if (name == "cost_source") {
+            EXPECT_EQ(stat.str_value(), "pallas_cost_estimate");
+            ++checked;
+          }
+        }
+        EXPECT_EQ(checked, 4);
+      }
+    }
+  }
+  EXPECT_EQ(kernels, 1);
+}
+
 TEST(ProfilerTest, StopClipsRuntimeReservationsAndOmitsFutureWork) {
   ASSERT_OK_AND_ASSIGN(auto session, StartProfile());
   const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(

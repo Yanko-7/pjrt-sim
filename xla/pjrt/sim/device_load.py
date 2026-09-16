@@ -9,6 +9,9 @@ def summarize_device_load(events):
             "estimated_dot_flops_by_dtype": Counter(),
             "estimated_hlo_read_bytes": 0,
             "estimated_hlo_write_bytes": 0,
+            "estimated_kernel_flops": 0,
+            "estimated_kernel_transcendentals": 0,
+            "estimated_kernel_bytes_accessed": 0,
             "estimated_hlo_duration_ns": 0,
             "hlo_cost_status_counts": Counter(),
             "hlo_cost_gap_counts": Counter(),
@@ -41,6 +44,13 @@ def summarize_device_load(events):
                     row["estimated_dot_flops_by_dtype"][metadata["dtype"]] += flops
                 row["estimated_hlo_read_bytes"] += read
                 row["estimated_hlo_write_bytes"] += write
+                row["estimated_kernel_flops"] += metadata.get("kernel_flops", 0)
+                row["estimated_kernel_transcendentals"] += metadata.get(
+                    "transcendentals", 0
+                )
+                row["estimated_kernel_bytes_accessed"] += metadata.get(
+                    "kernel_bytes_accessed", 0
+                )
                 row["estimated_hlo_duration_ns"] += event.duration_ns
                 key = (metadata.get("program_id"), metadata["hlo_id"])
                 operation = operations[device].setdefault(
@@ -58,7 +68,9 @@ def summarize_device_load(events):
                 )
                 operation["occurrences"] += 1
                 operation["dot_flops"] += flops
-                operation["logical_bytes"] += read + write
+                operation["logical_bytes"] += (
+                    read + write + metadata.get("kernel_bytes_accessed", 0)
+                )
         transfer = metadata.get("transfer_kind")
         if transfer in ("h2d", "d2h", "local_copy"):
             devices[device][transfer + "_bytes"] += metadata["bytes"]
@@ -87,7 +99,7 @@ def summarize_device_load(events):
         "limitations": [
             "Counts cover supported HLO only; cost gaps are not zero actual workload.",
             "Logical bytes are operand reads and output writes before fusion; not physical HBM traffic or memory capacity.",
-            "Dot FLOPs are grouped by output dtype; vector FLOPs and opaque kernels are excluded.",
+            "Dot FLOPs are grouped by output dtype. Author-declared Pallas costs have separate totals; kernel bytes have no read/write split and are not measured traffic.",
             "Communication bytes depend on the configured collective algorithm and routes; reduction arithmetic is excluded.",
             "Estimated durations and resource reservations are scenario results, not measured TPU utilization.",
         ],

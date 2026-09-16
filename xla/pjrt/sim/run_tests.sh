@@ -25,6 +25,8 @@ unset PJRT_SIM_TRACE
 "$sim_python" xla/pjrt/sim/runtime_sensitivity_test.py -v
 "$sim_python" xla/pjrt/sim/smoke_test.py -v
 "$sim_python" xla/pjrt/sim/pallas_smoke_test.py -v
+"$sim_python" xla/pjrt/sim/pallas_cost_test.py -v
+JAX_PLATFORMS=cpu "$sim_python" xla/pjrt/sim/pallas_lowering_test.py -v
 "$sim_python" xla/pjrt/sim/report_test.py -v
 "$sim_python" xla/pjrt/sim/profile_report_test.py -v
 "$sim_python" xla/pjrt/sim/virtual_clock_test.py -v

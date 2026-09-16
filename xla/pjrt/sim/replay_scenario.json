@@ -2,6 +2,7 @@
   "schema_version": 1,
   "name": "uncalibrated 8-device line scenario",
   "bf16_flops_per_second": 1153500000000000,
+  "transcendentals_per_second": 1000000000000,
   "hbm_bytes_per_second": 3690000000000,
   "compute_utilization": 1.0,
   "bandwidth_utilization": 1.0,
@@ -280,6 +281,7 @@
     "Directed ICI links are shared by chiplets. Routes use store-and-forward with ring round barriers.",
     "Compute reserves compute and HBM; communication reserves endpoint HBM conservatively.",
     "Logical pre-optimization traffic; BF16-equivalent dot rate; no fusion or collective reduction cost.",
+    "Pallas counts come from author estimates; transcendental throughput is hypothetical and kernel-internal overlap is not modeled.",
     "Host submissions have a constant cost; CPU timestamps, waits and idle gaps are discarded."
   ]
 }

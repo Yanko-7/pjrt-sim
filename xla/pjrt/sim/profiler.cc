@@ -146,6 +146,14 @@ std::string ProfileSession::Serialize() const {
                        event.framework_op);
       out.AddStatValue(*builder.GetOrCreateStatMetadata("cost_gap"),
                        event.cost_gap);
+      if (!event.cost_source.empty()) {
+        out.AddStatValue(*builder.GetOrCreateStatMetadata("cost_source"),
+                         event.cost_source);
+        out.AddStatValue(*builder.GetOrCreateStatMetadata("kernel_flops"),
+                         event.flops);
+        out.AddStatValue(*builder.GetOrCreateStatMetadata("transcendentals"),
+                         event.transcendentals);
+      }
       if (event.track == "HLO" && !event.cost_gap.empty()) {
         out.AddStatValue(*builder.GetOrCreateStatMetadata("cost_status"),
                          "unknown");
@@ -154,12 +162,14 @@ std::string ProfileSession::Serialize() const {
         out.AddStatValue(*builder.GetOrCreateStatMetadata("dot_flops"), "null");
       } else {
         out.AddStatValue(*builder.GetOrCreateStatMetadata("cost_status"),
-                         event.logical_bytes || event.dot_flops ? "estimated"
-                                                                : "structural");
+                         !event.cost_source.empty() || event.logical_bytes ||
+                                 event.flops || event.transcendentals
+                             ? "estimated"
+                             : "structural");
         out.AddStatValue(*builder.GetOrCreateStatMetadata("logical_bytes"),
                          event.logical_bytes);
         out.AddStatValue(*builder.GetOrCreateStatMetadata("dot_flops"),
-                         event.dot_flops);
+                         event.cost_source.empty() ? event.flops : 0.0);
       }
       if (event.track == "Executions")
         out.AddStatValue(*builder.GetOrCreateStatMetadata("annotation_kind"),
@@ -307,7 +317,8 @@ void ProfileActivity::Interval(const std::string& name, int64_t start,
                                const std::string& track,
                                const std::string& framework_op,
                                const std::string& cost_gap, double bytes,
-                               double flops) const {
+                               double flops, double transcendentals,
+                               const std::string& cost_source) const {
   if (!session_) return;
   ProfileEvent event = event_;
   event.name = name;
@@ -318,7 +329,9 @@ void ProfileActivity::Interval(const std::string& name, int64_t start,
   event.framework_op = framework_op;
   event.cost_gap = cost_gap;
   event.logical_bytes = bytes;
-  event.dot_flops = flops;
+  event.flops = flops;
+  event.transcendentals = transcendentals;
+  event.cost_source = cost_source;
   event.simulated = track != "CPU readiness" && track != "Runtime notification";
   session_->Begin(std::move(event), index_);
 }

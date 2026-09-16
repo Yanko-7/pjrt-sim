@@ -130,11 +130,13 @@ xla_cc_binary(
 
 cc_library(
     name = "execution_plan",
-    srcs = ["execution_plan.cc"],
-    hdrs = ["execution_plan.h"],
+    srcs = ["execution_plan.cc", "pallas_cost.cc"],
+    hdrs = ["execution_plan.h", "pallas_cost.h"],
     deps = [
         "//xla:shape_util",
         "//xla/hlo/ir:hlo",
+        "@com_google_protobuf//:protobuf",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/status:status_macros",

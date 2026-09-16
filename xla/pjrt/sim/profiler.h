@@ -49,8 +49,10 @@ struct ProfileEvent {
   std::string track;
   std::string framework_op;
   std::string cost_gap;
-  double dot_flops = 0;
+  double flops = 0;
   double logical_bytes = 0;
+  double transcendentals = 0;
+  std::string cost_source;
   bool simulated = false;
 };
 
@@ -96,7 +98,8 @@ class ProfileActivity {
                 int64_t device, const std::string& track,
                 const std::string& framework_op = {},
                 const std::string& cost_gap = {}, double bytes = 0,
-                double flops = 0) const;
+                double flops = 0, double transcendentals = 0,
+                const std::string& cost_source = {}) const;
   uint64_t correlation_id() const { return event_.correlation_id; }
 
  private:

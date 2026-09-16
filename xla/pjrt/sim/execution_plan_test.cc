@@ -4,12 +4,111 @@
 // You may obtain a copy at https://www.apache.org/licenses/LICENSE-2.0
 #include "xla/pjrt/sim/execution_plan.h"
 
+#include <algorithm>
+
 #include "gtest/gtest.h"
 #include "xla/hlo/parser/hlo_parser.h"
 #include "tsl/platform/status_matchers.h"
 
 namespace xla::sim {
 namespace {
+
+TEST(ExecutionPlanTest, PallasDeclaredCostsSurviveTupleOutputsAndManualScope) {
+  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(R"(
+HloModule test
+ENTRY main {
+  q = bf16[1,2,128,128] parameter(0)
+  ROOT attention = (bf16[1,2,128,128]) custom-call(q), custom_call_target="tpu_custom_call", sharding={{manual}}, backend_config={"custom_call_config":{"cost_estimate":{"flops":16842752,"transcendentals":"32768","bytes_accessed":262144}}}
+})"));
+  // These are the costs emitted by JAX 0.11.1 FlashAttention for this shape.
+  ExecutionPlan plan = BuildExecutionPlan(*module, 1);
+  ASSERT_EQ(plan.cost_gaps, 0);
+  const auto found = std::find_if(
+      plan.nodes.begin(), plan.nodes.end(),
+      [](const PlanNode& node) { return node.name == "attention"; });
+  ASSERT_NE(found, plan.nodes.end());
+  const PlanNode& node = *found;
+  EXPECT_EQ(node.flops, 16842752);
+  EXPECT_EQ(node.transcendentals, 32768);
+  EXPECT_EQ(node.bytes, 262144);
+  EXPECT_EQ(node.cost_source, "pallas_cost_estimate");
+}
+
+TEST(ExecutionPlanTest, PallasReplicatedCostsAreNotDividedByDeviceCount) {
+  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(R"(
+HloModule test
+ENTRY main {
+  q = bf16[4] parameter(0), sharding={replicated}
+  ROOT attention = bf16[4] custom-call(q), custom_call_target="tpu_custom_call", sharding={replicated}, backend_config={"custom_call_config":{"cost_estimate":{"flops":800,"transcendentals":40,"bytes_accessed":16}}}
+})"));
+  ExecutionPlan plan = BuildExecutionPlan(*module, 8);
+  ASSERT_EQ(plan.cost_gaps, 0);
+  double flops = 0;
+  for (const PlanNode& node : plan.nodes) flops += node.flops;
+  EXPECT_EQ(flops, 800);
+}
+
+TEST(ExecutionPlanTest, PallasWithoutKnownScopeStaysUnknown) {
+  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(R"(
+HloModule test
+ENTRY main {
+  q = bf16[4] parameter(0)
+  ROOT attention = bf16[4] custom-call(q), custom_call_target="tpu_custom_call", backend_config={"custom_call_config":{"cost_estimate":{"flops":800,"transcendentals":40,"bytes_accessed":16}}}
+})"));
+  ExecutionPlan plan = BuildExecutionPlan(*module, 8);
+  EXPECT_EQ(plan.cost_gaps, 1);
+  for (const PlanNode& node : plan.nodes)
+    EXPECT_EQ(node.kind, PlanNode::Kind::kBarrier);
+}
+
+TEST(ExecutionPlanTest, PallasInManualCalleeIsCountedAtEveryCallSite) {
+  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(R"(
+HloModule test
+local {
+  q = bf16[4] parameter(0)
+  ROOT attention = bf16[4] custom-call(q), custom_call_target="tpu_custom_call", backend_config={"custom_call_config":{"cost_estimate":{"flops":800,"transcendentals":40,"bytes_accessed":16}}}
+}
+ENTRY main {
+  q = bf16[4] parameter(0), sharding={manual}
+  a = bf16[4] call(q), to_apply=local
+  b = bf16[4] call(q), to_apply=local
+  ROOT result = (bf16[4],bf16[4]) tuple(a,b)
+})"));
+  ExecutionPlan plan = BuildExecutionPlan(*module, 8);
+  ASSERT_EQ(plan.cost_gaps, 0);
+  double flops = 0;
+  for (const PlanNode& node : plan.nodes) flops += node.flops;
+  EXPECT_EQ(flops, 1600);
+}
+
+TEST(ExecutionPlanTest, MalformedOrCommunicatingPallasStaysUnknown) {
+  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(R"(
+HloModule test
+ENTRY main {
+  ROOT attention = bf16[4] custom-call(), custom_call_target="tpu_custom_call"
+})"));
+  for (
+      const char* config :
+      {"not JSON", "{}",
+       R"({"custom_call_config":{"cost_estimate":{"flops":1,"transcendentals":0,"bytes_accessed":-1}}})",
+       R"({"custom_call_config":{"cost_estimate":{"flops":1,"transcendentals":0,"bytes_accessed":"NaN"}}})",
+       R"({"custom_call_config":{"cost_estimate":{"flops":true,"transcendentals":0,"bytes_accessed":16}}})",
+       R"({"custom_call_config":{"cost_estimate":{"flops":1,"transcendentals":0,"bytes_accessed":1.5}}})",
+       R"({"custom_call_config":{"cost_estimate":{"flops":1,"transcendentals":0,"bytes_accessed":16,"remote_bytes_transferred":1}}})",
+       R"({"custom_call_config":{"has_communication":true,"cost_estimate":{"flops":1,"transcendentals":0,"bytes_accessed":16}}})"}) {
+    module->entry_computation()
+        ->root_instruction()
+        ->set_raw_backend_config_string(config);
+    ExecutionPlan plan = BuildExecutionPlan(*module, 1);
+    EXPECT_EQ(plan.cost_gaps, 1) << config;
+    for (const PlanNode& node : plan.nodes) {
+      EXPECT_EQ(node.flops, 0);
+      EXPECT_EQ(node.transcendentals, 0);
+      EXPECT_EQ(node.bytes, 0);
+      EXPECT_TRUE(node.cost_source.empty());
+    }
+  }
+}
 
 TEST(ExecutionPlanTest, ContractingShardingCreatesLocalWorkAndAllReduce) {
   ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(R"(

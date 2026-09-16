@@ -6,9 +6,19 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.experimental import pallas as pl
+from jax.experimental.pallas.ops.tpu import flash_attention
 
 
 class PallasTest(unittest.TestCase):
+    def test_flash_attention_native_lowering(self):
+        # Exercise a real attention kernel with an author-declared estimate.
+        # Numerical results remain placeholders; this checks compilation and
+        # execution through the same Pallas path used by the cost model.
+        value = jnp.ones((1, 2, 128, 128), dtype=jnp.bfloat16)
+        result = jax.jit(flash_attention.flash_attention)(value, value, value)
+        result.block_until_ready()
+        self.assertEqual(result.shape, value.shape)
+
     def test_aliased_storage(self):
         def kernel(x_ref, y_ref):
             y_ref[...] = x_ref[...] + 1

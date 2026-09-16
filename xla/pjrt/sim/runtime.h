@@ -25,6 +25,7 @@ namespace xla::sim {
 struct RuntimeConfig {
   // Hypothetical per-chiplet rates, not calibrated TPU measurements.
   double flops_per_second = 1.1535e15;
+  double transcendentals_per_second = 1e12;
   double hbm_bytes_per_second = 3.69e12;
   double host_bytes_per_second = 32e9;
   double link_bytes_per_second = 100e9;

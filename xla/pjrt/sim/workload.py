@@ -1,12 +1,14 @@
 """Small, explicit analytic lowering of original HLO, before CPU substitutions.
 
-Only uniform identity-order sharding and ordinary 2D tensor-parallel dots are
-resolved here. Unsupported work remains a dependency node with a coverage gap.
+Uniform identity-order sharding, ordinary 2D tensor-parallel dots, and local
+author-declared Pallas costs are resolved here. Unsupported work remains a
+dependency node with a coverage gap.
 """
 
 import math
 
 from communication import nonnegative
+from pallas_cost import pallas_cost
 from virtual_clock import Event
 
 ANNOTATIONS = {
@@ -127,6 +129,12 @@ class Workload:
         self.inferred_collectives = 0
         self.compute_rate = self._rate("bf16_flops_per_second", "compute_utilization")
         self.memory_rate = self._rate("hbm_bytes_per_second", "bandwidth_utilization")
+        self.transcendental_rate = nonnegative(
+            self.scenario.get("transcendentals_per_second", 1e12),
+            "transcendentals_per_second",
+        )
+        if self.transcendental_rate == 0:
+            raise ValueError("transcendentals_per_second must be positive")
 
     def _rate(self, rate, utilization):
         value = nonnegative(self.scenario[rate], rate)
@@ -187,6 +195,13 @@ class Workload:
                 return (1,) * rank
             return tile_shape(shardings[i["id"]], rank, len(self.devices))
 
+        def replicated(i):
+            sharding = i.get("sharding")
+            return i["opcode"] == "constant" or (
+                sharding is not None
+                and sharding.get("type", "REPLICATED") == "REPLICATED"
+            )
+
         resolved = {}
 
         def visit(id):
@@ -223,6 +238,7 @@ class Workload:
             else:
                 duration, collective, size = 0, None, 0
                 flops, read_bytes, write_bytes = 0, 0, 0
+                kernel = {}
                 cost_status, reason = "structural", ""
                 target = i.get("custom_call_target")
                 try:
@@ -235,6 +251,25 @@ class Workload:
                             and tiles(i) != tiles(operands[0])
                         ):
                             raise ValueError("unmodeled resharding")
+                    elif target == "tpu_custom_call":
+                        kernel = pallas_cost(
+                            i,
+                            local=local
+                            or len(self.devices) == 1
+                            or is_local(id)
+                            or (
+                                replicated(i) and all(replicated(op) for op in operands)
+                            ),
+                        )
+                        duration = math.ceil(
+                            max(
+                                kernel["flops"] / self.compute_rate,
+                                kernel["transcendentals"] / self.transcendental_rate,
+                                kernel["bytes_accessed"] / self.memory_rate,
+                            )
+                            * 1e9
+                        )
+                        cost_status = "estimated"
                     elif opcode == "dot":
                         # Only lhs[M,K] @ rhs[K,N], with matching K partitions.
                         dims = i["dot_dimension_numbers"]
@@ -288,6 +323,7 @@ class Workload:
                         {"instruction": id, "name": i["name"], "reason": str(error)}
                     )
                     duration = 0
+                    kernel = {}
                     collective = None
                     flops, read_bytes, write_bytes = None, None, None
                     cost_status, reason = "unknown", str(error)
@@ -316,6 +352,18 @@ class Workload:
                                 "dot_flops": flops,
                                 "logical_read_bytes": read_bytes,
                                 "logical_write_bytes": write_bytes,
+                                **(
+                                    {
+                                        "cost_source": "pallas_cost_estimate",
+                                        "kernel_flops": kernel["flops"],
+                                        "transcendentals": kernel["transcendentals"],
+                                        "kernel_bytes_accessed": kernel[
+                                            "bytes_accessed"
+                                        ],
+                                    }
+                                    if kernel
+                                    else {}
+                                ),
                             },
                         )
                     )

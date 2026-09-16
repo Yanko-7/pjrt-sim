@@ -26,9 +26,11 @@ struct PlanNode {
   std::string name;
   std::string framework_op;
   std::string cost_gap;
+  std::string cost_source;
   Kind kind = Kind::kBarrier;
   std::vector<int> dependencies;
   double flops = 0;
+  double transcendentals = 0;
   double bytes = 0;
 };
 
