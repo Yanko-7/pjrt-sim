@@ -48,6 +48,15 @@ mode as the integration baseline until these checks pass with the serving loop.
 
 ## 3. Communication and memory
 
+Implemented foundation (2026-09-16): opt-in scalar-backed virtual storage for
+large floating arrays with single-host SPMD execution. XLA partitions before
+storage substitution; local logical shapes feed costs and buffer accounting.
+Integer controls remain materialized. Directed all-to-all/permute payloads and
+explicit full-group ring collectives are modeled online and in replay.
+See README for restrictions and ITERATIONS for the 128 GiB model-state test.
+This does not yet model physical HBM capacity or validate a complete large-model
+serving framework.
+
 Extend the existing resource model incrementally:
 
 - Bring declared routes and directed link sharing into online execution.

@@ -186,3 +186,85 @@ paged/ragged attention without declared costs, communication/memory extensions
 and TPU calibration remain unfinished; see `PERFORMANCE_PLAN.md`. No Falcon
 experiment was submitted; hardware/cluster or an existing experiment ID is
 still needed for calibration.
+
+## Virtual storage for large tensors (2026-09-16)
+
+`PJRT_SIM_MAX_MATERIALIZED_BYTES` enables a per-array storage threshold. Large
+static floating arrays retain logical metadata over scalar CPU buffers. A small
+HLO transformation changes the physical signatures and replaces affected floating
+operations, while the original execution plan still supplies costs. CPU PJRT
+continues to own asynchronous execution, donation and buffer lifetimes. Logical
+layouts and buffer sizes are exposed through wrappers; virtual host reads and
+pointer exports fail explicitly. Configuration is captured per client.
+
+The first version supports single-partition executables, integer-controlled
+calls/loops/branches, cache updates and local device copies. Large nonfloating
+arrays, dynamic shapes, nested result tuples and tuple parameters are rejected.
+Float-to-control conversion is conservatively rejected, including small float
+comparisons and sampling. This avoids requiring a new interpreter or propagating
+value validity across executable boundaries. Default storage is unchanged.
+
+Validation on the local Python 3.13 / JAX 0.11.1 environment:
+
+- Six C++ test targets pass, including new HLO verification for a large loop-carried
+  tensor, small slices and rejected integer/control boundaries.
+- Four virtual-storage JAX tests pass. Four logical 32 GiB weights plus a 512 MiB
+  cache increase peak RSS by 65 MiB. Two donated decode calls execute dense
+  projections and cache updates; integer loop state advances from 7 to 10 to 13.
+- Virtual H2D, local device copies, modeled asynchronous readiness, logical live
+  memory accounting, and rejected host reads/pointer access pass. Reading a
+  logical 32 GiB weight fails without increasing RSS by that size.
+- Native FlashAttention lowering on virtual inputs and an aliased, donated Pallas
+  output pass. FlashAttention still reports 137,975,824,384 declared FLOPs and
+  134,217,728 accessed bytes in the execution trace, not scalar-buffer costs.
+- Default-mode readiness, cost sensitivity, smoke and Pallas tests pass, along
+  with multi-device regression for 2, 4 and 8 devices.
+
+This validates large logical model state and a decode computation, not a full
+large-model serving framework. Weight loading may allocate host data before PJRT.
+Virtual tensor-parallel serving, sampling policy, virtual-time request scheduling,
+physical HBM capacity/alias accounting and real TPU calibration remain unfinished.
+
+## Virtual tensor parallelism (2026-09-16)
+
+Virtual storage now supports one-host, one-replica SPMD execution. The plugin
+runs XLA's Shardy/sharding propagation and SPMD partitioner before estimating
+costs and replacing storage. Public executable metadata retains global shardings;
+individual buffers expose local logical shapes and sizes. CPU compilation skips
+the already-completed partitioning passes, while retaining normal optimization,
+code generation and integer collective execution. The storage threshold applies
+to each device shard, including transitions between materialized and virtual
+storage during compiled resharding.
+
+Online plans use local shapes and explicit inserted collectives. All-to-all and
+collective-permute now reserve directed logical links with group barriers;
+existing all-reduce/all-gather/reduce-scatter retain the synthetic ring. Compact
+XLA collective groups are normalized in snapshots for offline replay. The new
+`per_partition` scope prevents dividing already-local dot or traffic counts by TP
+again. Subgroups and physical topology/HBM contention remain coverage limits.
+
+Validation:
+
+- Six C++ targets pass, including local-dot/explicit-all-reduce accounting,
+  all-to-all/permute payload sizes and directed-transfer completion on reordered
+  physical devices. The 31 Python replay/cost/report tests pass.
+- Five new virtual TP tests pass for each of 2, 4 and 8 devices: 128 GiB dense
+  weights plus a 512 MiB cache, three donated decode steps, column/row/replicated
+  resharding, storage threshold crossings, reordered meshes with mixed integer
+  collectives, and native Pallas FlashAttention in shard_map.
+- Peak RSS growth for the large TP state/decode test: 75.0 MiB (TP 2), 73.0 MiB
+  (TP 4), 74.1 MiB (TP 8). These are host storage observations, not TPU timings.
+- Local decode FLOPs are 68,719,476,736 / 34,359,738,368 / 17,179,869,184 for
+  TP 2/4/8. Online and replay report zero cost gaps for that test. FlashAttention
+  retains 137,975,824,384 declared FLOPs per device for its fixed local shape.
+  Captures are `/tmp/pjrt-sim-virtual-tp{2,4,8}.*`.
+- Existing integer/multi-device tests pass in virtual and default modes at
+  TP 2/4/8. Single-partition virtual storage, online readiness, sensitivity,
+  ordinary smoke and native Pallas regressions also pass.
+
+Some JAX `device_put` repartitioning paths require a host read and therefore
+cannot move virtual arrays. Compiled identity functions with explicit input and
+output shardings perform device-side resharding; the README includes an example.
+No JAX/framework source patch was introduced. Full large-model serving and token
+sampling remain unvalidated/unsupported respectively; the clock is still real
+time, and no TPU calibration was performed.

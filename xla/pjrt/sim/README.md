@@ -7,10 +7,97 @@ integer/control computations, donation and asynchronous functional execution. A 
 model gates public completion using original-HLO plans and timed resource reservations.
 Floating-point dots and native Pallas custom calls use deterministic numerical placeholders.
 
-**Scope:** one host and small dense models. Host memory is still physically
-allocated. This is not yet a virtual-memory backend for full-size models, a TPU
-compiler, or a calibrated latency predictor. No SGLang-Jax source patch is needed
-for the included integration test.
+**Scope:** one host. Default mode uses real CPU storage and supports the tested
+small dense models, including tensor parallelism. Opt-in virtual storage allows
+large logical floating tensors with multi-device SPMD partitioning (see below).
+Full-size SGLang serving has not been validated. This is not a TPU compiler or a calibrated
+latency predictor. No SGLang-Jax source patch is needed for the included integration
+test.
+
+## Large tensors with virtual storage
+
+Set this **before JAX initializes the backend**:
+
+```sh
+export PJRT_SIM_MAX_MATERIALIZED_BYTES=16777216  # 16 MiB per local shard
+```
+
+The default, `0`, disables virtual storage. A positive limit must be at least
+16 bytes. Static floating device shards larger than the limit retain their logical
+shape, dtype and byte count, with a scalar CPU buffer carrying readiness and
+ownership. Costs and transfer deadlines still use the original sizes. Operations
+that consume or produce these arrays use floating placeholders; small arrays and
+integer control calculations continue on the CPU. This is a per-device-shard threshold,
+not a process memory cap or an HBM capacity limit.
+
+Create large weights/cache through compiled shape-based initialization such as
+`jax.jit(lambda: jnp.zeros(shape, jnp.bfloat16))()`. Large floating host imports
+skip the payload inside the plugin, but a framework's weight loader or JAX may
+already have allocated or copied the host source before reaching PJRT.
+
+Supported paths include ordinary HLO, existing Pallas substitutions, tuples,
+static calls, integer-controlled loops/branches, cache updates, donation and
+copies between local devices. With multiple partitions, XLA first lowers global
+shapes to each device's local shapes and inserts collectives. Storage substitution
+then uses those local shapes. Public buffer sizes and live-buffer accounting
+remain logical. Compiled memory analysis is unavailable because physical CPU
+statistics describe the scalar program.
+
+Current limits:
+
+- One host and one replica per executable. SPMD tensor parallelism is tested
+  on 2, 4 and 8 devices; a complete full-size serving framework is not yet validated.
+- Some JAX `device_put` resharding paths read data through the host and fail for
+  virtual arrays. Use compiled resharding as shown below.
+- Integer/bool tensors larger than the threshold are rejected. Dynamic shapes,
+  tuple parameters, nested tuple results and virtual buffer bitcasts are unsupported.
+- Floating-to-integer/bool operations are conservatively rejected, including
+  small comparisons and argmax/sampling. This prevents approximated floating
+  data from silently changing control decisions across calls or loops.
+- Virtual tensors cannot be read on the host or exported as pointers. Small
+  floating outputs may be placeholders; numerical results are not meaningful.
+- The completion clock still advances in real time. Virtual storage does not
+  implement virtual-time-driven request scheduling or hardware calibration.
+
+### Tensor parallelism and device-side resharding
+
+Select the device count before initializing JAX, then use normal JAX shardings:
+
+```python
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+mesh = Mesh(np.array(jax.devices()), ("tp",))
+columns = NamedSharding(mesh, P(None, "tp"))
+rows = NamedSharding(mesh, P("tp", None))
+weight = jax.jit(
+    lambda: jnp.zeros((65536, 65536), jnp.bfloat16),
+    out_shardings=columns,
+)()
+weight_rows = jax.jit(
+    lambda x: x, in_shardings=columns, out_shardings=rows
+)(weight)
+weight_rows.block_until_ready()
+```
+
+For example, `PJRT_SIM_DEVICE_COUNT=8` distributes this logical 8 GiB weight
+across eight 1 GiB virtual shards. No full host weight array is created.
+
+The online plan counts post-partition dot work and explicit all-reduce,
+all-gather, reduce-scatter, all-to-all and collective-permute payloads before
+storage substitution. Full identity partition groups are modeled; subgroup
+collectives remain explicit gaps. Ring collectives retain the existing synthetic
+ring. All-to-all and permute use directed logical links with a group barrier;
+physical routing, endpoint HBM contention and reduction arithmetic remain uncalibrated.
+Trace records use `work_scope: per_partition` and snapshots use
+`shape_scope: per_partition` so online and offline costs are not divided by TP twice.
+
+Run `virtual_storage_test.py` for single-partition coverage, and
+`virtual_multidevice_test.py` with 2, 4 or 8 devices for large TP decode, cache
+donation, resharding, materialization threshold transitions, reordered devices,
+integer collectives and Pallas attention.
 
 ## Tested source baseline
 
@@ -159,7 +246,8 @@ offline replay scenario JSON.
 The first online model supports uniform identity sharding, static calls, ordinary
 2D dots and selected memory operations. Contracting-axis TP dots infer an
 all-reduce; explicit full-group partition all-reduce/all-gather/reduce-scatter use
-a synthetic directed ring. Ring links are exclusive, with round barriers and
+a synthetic directed ring. All-to-all and collective-permute reserve directed
+logical links with group barriers. Ring links are exclusive, with round barriers and
 all-participant arrival; reduction arithmetic and collective HBM contention are
 not modeled. Copies reserve endpoint HBM. Computation reserves compute and HBM
 resources. Submissions use a conservative FIFO reservation policy; each program
@@ -334,8 +422,10 @@ HLO protobuf as JSON (including shapes, sharding, calls and opaque kernel payloa
 and per-instruction work estimates before numerical substitutions. Program IDs
 remain unique when executable addresses are reused. Enable tracing before the
 process starts, create the output directory, and keep the snapshots beside the
-execution JSONL. Work is captured before partitioning (`work_scope=pre_partition`). Executions used
-for runtime initialization are also present; traces have no request-phase labels
+execution JSONL. Default-mode work is captured before partitioning
+(`work_scope=pre_partition`); virtual multi-device work is captured after XLA
+partitioning (`work_scope=per_partition`, snapshot `shape_scope=per_partition`).
+Executions used for runtime initialization are also present; traces have no request-phase labels
 yet. Static calls are counted per call site; dynamic control flow and higher-order
 operations are excluded from timing and counted as unmodeled work.
 
@@ -431,7 +521,8 @@ The implementation modules are:
 - `workload.py`: static call expansion, local shard-map scopes, uniform identity
   sharding and ordinary 2D tensor-parallel dots. Output-dimension partitioning uses
   local compute; matching full-group contracting partitions add an all-reduce.
-  Other operations receive logical memory traffic estimates when sharding is known.
+  Post-partition snapshots use local sizes and explicit full-group collectives,
+  all-to-all and permute transfers. Other operations receive logical memory traffic estimates when sharding is known.
 - `xprof_export.py`: canonical XSpace serialization and simulated resource tracks.
 - `replay.py`: capture validation, per-device execution order, conservative buffer
   readiness, H2D/D2H/copy costs and configurable host submission/launch costs.
@@ -445,11 +536,11 @@ This conservative contention model can be varied with `communication_uses_hbm`;
 it is not a fractional bandwidth-sharing model.
 
 **The output is a partial fixed-workload scenario, not predicted request latency.**
-Opaque Pallas attention, vector throughput, unknown/uneven sharding, general
-resharding, dynamic control flow, direct HLO collective lowering and TPU compiler
-fusion/scheduling are not covered. Unsupported operations stay in the dependency
-graph with zero cost and a reported gap. Only inferred tensor-parallel dot
-all-reduces currently connect HLO to the collective engine. The report always sets
+Pallas kernels without declared costs, vector throughput, unknown/uneven sharding,
+subgroup collectives, dynamic control flow and TPU compiler fusion/scheduling
+are not covered. Unsupported operations stay in the dependency graph with zero
+cost and a reported gap. Inferred dot all-reduces and supported explicit HLO
+collectives connect to the communication engine. The report always sets
 `complete_latency_prediction=false` and names its duration `partial_makespan_ns`.
 
 Host submission costs are scenario inputs. Cross-thread queues, callback causality,
