@@ -12,6 +12,7 @@ mkdir -p "$sim_results"
 bazel test -c opt //xla/pjrt/sim:hlo_model_test \
   //xla/pjrt/sim:profiler_test //xla/pjrt/sim:instrumentation_test \
   //xla/pjrt/sim:runtime_test //xla/pjrt/sim:execution_plan_test \
+  //xla/pjrt/sim:virtual_storage_test \
   //xla/pjrt/sim:pjrt_sim_plugin.so //xla/pjrt/sim:xplane_descriptor --jobs=8 --test_output=errors --noannounce_rc
 
 unset PJRT_SIM_PROFILE_PYTHON PJRT_SIM_PROFILE_HELPER
@@ -19,8 +20,9 @@ export JAX_PLATFORMS=tpu
 export JAX_ENABLE_COMPILATION_CACHE=false
 export PJRT_NAMES_AND_LIBRARY_PATHS="tpu:$sim_root/bazel-bin/xla/pjrt/sim/pjrt_sim_plugin.so"
 export PJRT_SIM_DEVICE_COUNT=1
-unset PJRT_SIM_TRACE
+unset PJRT_SIM_TRACE PJRT_SIM_MAX_MATERIALIZED_BYTES
 
+"$sim_python" xla/pjrt/sim/virtual_storage_test.py -v
 "$sim_python" xla/pjrt/sim/online_runtime_test.py -v
 "$sim_python" xla/pjrt/sim/runtime_sensitivity_test.py -v
 "$sim_python" xla/pjrt/sim/smoke_test.py -v
@@ -45,6 +47,8 @@ for sim_devices in 1 2 4 8; do
   mkdir -p "$sim_case"
   sim_args=(--tp-size "$sim_devices" --profile-dir "$sim_case/profile")
   if ((sim_devices > 1)); then
+    "$sim_python" xla/pjrt/sim/virtual_multidevice_test.py -v
+    PJRT_SIM_MAX_MATERIALIZED_BYTES=16777216 "$sim_python" xla/pjrt/sim/multidevice_test.py -v
     "$sim_python" xla/pjrt/sim/multidevice_test.py -v
     "$sim_python" xla/pjrt/sim/profiler_smoke_test.py --output "$sim_case/runtime-profile"
     sim_args+=(--overlap)
