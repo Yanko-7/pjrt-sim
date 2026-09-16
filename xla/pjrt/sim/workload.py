@@ -19,7 +19,16 @@ ANNOTATIONS = {
     "xla.sdy.GlobalToLocalShape",
     "xla.sdy.LocalToGlobalShape",
 }
-VIEWS = {"parameter", "constant", "tuple", "get-tuple-element", "bitcast", "reshape"}
+VIEWS = {
+    "parameter",
+    "constant",
+    "tuple",
+    "get-tuple-element",
+    "bitcast",
+    "reshape",
+    "partition-id",
+    "replica-id",
+}
 ELEMENTWISE = {
     "abs",
     "add",
@@ -120,6 +129,8 @@ def tile_shape(sharding, rank, devices):
 class Workload:
     def __init__(self, snapshot, devices, scenario, communication):
         self.hlo = snapshot["hlo"]
+        self.costs = snapshot.get("costs", {})
+        self.partitioned = snapshot.get("shape_scope") == "per_partition"
         self.devices = tuple(devices)
         self.scenario = scenario
         self.communication = communication
@@ -144,7 +155,9 @@ class Workload:
         return value * fraction
 
     def lower(self):
-        roots = self._computation(self.hlo["entry_computation_id"], "hlo", False, None)
+        roots = self._computation(
+            self.hlo["entry_computation_id"], "hlo", self.partitioned, None
+        )
         for d in self.devices:
             self.events.append(
                 Event(
@@ -237,6 +250,7 @@ class Workload:
                     )
             else:
                 duration, collective, size = 0, None, 0
+                transfers = None
                 flops, read_bytes, write_bytes = 0, 0, 0
                 kernel = {}
                 cost_status, reason = "structural", ""
@@ -269,6 +283,46 @@ class Workload:
                             )
                             * 1e9
                         )
+                        cost_status = "estimated"
+                    elif opcode in (
+                        "all-reduce",
+                        "all-gather",
+                        "reduce-scatter",
+                        "all-to-all",
+                        "collective-permute",
+                    ):
+                        if "channel_id" not in i or len(operands) != 1:
+                            raise ValueError("unsupported collective scope")
+                        size = shape_bytes(operands[0]["shape"], tiles(operands[0]))
+                        count = len(self.devices)
+                        if opcode == "collective-permute":
+                            pairs = [
+                                (int(p.get("source", 0)), int(p.get("target", 0)))
+                                for p in i.get("source_target_pairs", [])
+                            ]
+                            if (
+                                any(
+                                    s < 0 or t < 0 or s >= count or t >= count
+                                    for s, t in pairs
+                                )
+                                or len({s for s, _ in pairs}) != len(pairs)
+                                or len({t for _, t in pairs}) != len(pairs)
+                            ):
+                                raise ValueError("unsupported collective-permute pairs")
+                            transfers = [(s, t) for s, t in pairs if s != t]
+                        else:
+                            groups = self.costs.get(id, {}).get("collective_groups")
+                            if groups != [list(range(count))]:
+                                raise ValueError("unsupported collective group")
+                            if opcode == "all-to-all":
+                                size = math.ceil(size / count)
+                                transfers = [
+                                    (s, t)
+                                    for s in range(count)
+                                    for t in range(count)
+                                    if s != t
+                                ]
+                        collective = opcode
                         cost_status = "estimated"
                     elif opcode == "dot":
                         # Only lhs[M,K] @ rhs[K,N], with matching K partitions.
@@ -368,16 +422,37 @@ class Workload:
                         )
                     )
                 if collective:
-                    self.inferred_collectives += 1
+                    self.inferred_collectives += opcode == "dot"
                     end = f"{path}/{id}/collective"
-                    self.events += self.communication.ring(
-                        end, collective, self.devices, size, compute
-                    )
+                    if transfers is None:
+                        self.events += self.communication.ring(
+                            end, collective, self.devices, size, compute
+                        )
+                    else:
+                        arrivals = tuple(compute.values())
+                        completed = []
+                        for source, target in transfers:
+                            transfer = f"{end}/{source}>{target}"
+                            self.events += self.communication.transfer(
+                                transfer,
+                                self.devices[source],
+                                self.devices[target],
+                                size,
+                                arrivals,
+                            )
+                            completed.append(transfer)
+                        self.events.append(
+                            Event(
+                                end,
+                                collective + " complete",
+                                dependencies=tuple(completed) or arrivals,
+                            )
+                        )
                     for d in self.devices:
                         self.events.append(
                             Event(
                                 result[d],
-                                "tensor-parallel dot complete",
+                                "collective result ready",
                                 dependencies=(end,),
                             )
                         )

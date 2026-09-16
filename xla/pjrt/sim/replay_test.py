@@ -74,6 +74,51 @@ def dot_program(contract=True):
 
 
 class ReplayTest(unittest.TestCase):
+    def test_partitioned_snapshot_has_local_work_and_explicit_collective(self):
+        snapshot = dot_program()
+        snapshot["shape_scope"] = "per_partition"
+        main = snapshot["hlo"]["computations"][0]
+        for instruction in main["instructions"]:
+            instruction.pop("sharding", None)
+        main["instructions"].append(
+            {
+                "id": "reduce",
+                "name": "sum",
+                "opcode": "all-reduce",
+                "operand_ids": ["z"],
+                "channel_id": "1",
+                "shape": main["instructions"][-1]["shape"],
+            }
+        )
+        main["root_id"] = "reduce"
+        snapshot["costs"] = {"reduce": {"collective_groups": [[0, 1]]}}
+        model = Workload(snapshot, (0, 1), scenario(), network())
+        events = [Event(f"start:{d}", "start") for d in (0, 1)] + model.lower()
+        self.assertEqual(model.gaps, [])
+        self.assertEqual(model.inferred_collectives, 0)
+        self.assertEqual(summarize(simulate(events))["makespan_ns"], 122)
+
+    def test_partitioned_permute_uses_logical_bytes(self):
+        snapshot = dot_program()
+        snapshot["shape_scope"] = "per_partition"
+        main = snapshot["hlo"]["computations"][0]
+        main["instructions"] = main["instructions"][:1] + [
+            {
+                "id": "permute",
+                "name": "move",
+                "opcode": "collective-permute",
+                "operand_ids": ["x"],
+                "channel_id": "1",
+                "shape": main["instructions"][0]["shape"],
+                "source_target_pairs": [{"target": "1"}],
+            }
+        ]
+        main["root_id"] = "permute"
+        model = Workload(snapshot, (0, 1), scenario(), network())
+        events = [Event(f"start:{d}", "start") for d in (0, 1)] + model.lower()
+        self.assertEqual(model.gaps, [])
+        self.assertEqual(summarize(simulate(events))["makespan_ns"], 17)
+
     def test_contracting_partition_infers_collective_and_local_work(self):
         model = Workload(dot_program(), (0, 1), scenario(), network())
         events = [Event(f"start:{d}", "start") for d in (0, 1)] + model.lower()
