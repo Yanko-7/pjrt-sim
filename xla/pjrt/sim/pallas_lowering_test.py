@@ -7,7 +7,8 @@ import jax
 import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu import flash_attention
 
-from pallas_cost import pallas_cost
+from pallas_cost_test import kernel_snapshot, kernel_cost
+from plan_test_utils import entry
 
 
 def custom_calls(operation):
@@ -35,9 +36,11 @@ class PallasLoweringTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         config = calls[0].attributes["backend_config"].value
         # Match HloInstructionProto's bytes-in-JSON representation.
-        cost = pallas_cost(
-            {"backend_config": base64.b64encode(config.encode()).decode()}, local=True
-        )
+        snapshot = kernel_snapshot()
+        entry(snapshot)["instructions"][0]["backend_config"] = base64.b64encode(
+            config.encode()
+        ).decode()
+        cost = kernel_cost(snapshot)
         self.assertEqual(cost["flops"], 16842752)
         self.assertEqual(cost["transcendentals"], 32768)
         self.assertEqual(cost["bytes_accessed"], 262144)

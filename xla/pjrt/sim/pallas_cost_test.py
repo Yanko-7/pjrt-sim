@@ -1,73 +1,85 @@
-"""Declared kernel costs, scope checks, and replay timing with hand-sized rates."""
+"""Declared Pallas costs through the canonical native planner and replay."""
 
 import base64
 import json
 import unittest
 
 from device_load import summarize_device_load
-from pallas_cost import pallas_cost
+from execution_plan import load_plan
+from plan_test_utils import entry, snapshot_from_hlo
 from replay_test import scenario
 from virtual_clock import Event, simulate, summarize
 from virtual_clock_test import network
 from workload import Workload
 
 
-def instruction(cost=None, **call_fields):
+def kernel_snapshot(cost=None, **call_fields):
+    snapshot = snapshot_from_hlo("""
+HloModule kernel
+ENTRY main {
+  ROOT attention = (bf16[4]) custom-call(), custom_call_target="tpu_custom_call", sharding={replicated}
+}
+""")
     config = {
         "custom_call_config": {
             "cost_estimate": cost
-            or {"flops": 800, "transcendentals": 40, "bytes_accessed": 160},
+            if cost is not None
+            else {
+                "flops": 800,
+                "transcendentals": 40,
+                "bytes_accessed": 160,
+            },
             **call_fields,
         }
     }
+    entry(snapshot)["instructions"][0]["backend_config"] = base64.b64encode(
+        json.dumps(config).encode()
+    ).decode()
+    return snapshot
+
+
+def kernel_cost(snapshot, devices=1):
+    node = next(n for n in load_plan(snapshot, devices)["nodes"] if n["hlo_id"])
+    if node["cost_gap"]:
+        raise ValueError(node["cost_gap"])
     return {
-        "id": "attention",
-        "name": "attention",
-        "opcode": "custom-call",
-        "custom_call_target": "tpu_custom_call",
-        "shape": {
-            "element_type": "TUPLE",
-            "tuple_shapes": [
-                {"element_type": "BF16", "dimensions": ["4"]},
-            ],
-        },
-        "backend_config": base64.b64encode(json.dumps(config).encode()).decode(),
-        "sharding": {"type": "REPLICATED"},
+        "flops": node["flops"],
+        "transcendentals": node["transcendentals"],
+        "bytes_accessed": node["bytes"],
     }
 
 
 class PallasCostTest(unittest.TestCase):
     def test_numeric_and_protobuf_string_counts(self):
         expected = {"flops": 800, "transcendentals": 40, "bytes_accessed": 160}
-        self.assertEqual(pallas_cost(instruction(), local=True), expected)
+        self.assertEqual(kernel_cost(kernel_snapshot()), expected)
         self.assertEqual(
-            pallas_cost(
-                instruction({k: str(v) for k, v in expected.items()}), local=True
-            ),
+            kernel_cost(kernel_snapshot({k: str(v) for k, v in expected.items()})),
             expected,
         )
 
     def test_unknown_scope_and_invalid_counts(self):
+        snapshot = kernel_snapshot()
+        del entry(snapshot)["instructions"][0]["sharding"]
         with self.assertRaisesRegex(ValueError, "scope"):
-            pallas_cost(instruction(), local=False)
+            kernel_cost(snapshot, 2)
         for bad in (-1, True, None, "NaN", "Infinity", 2**63, 1.5, [], {}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
-                pallas_cost(
-                    instruction(
+                kernel_cost(
+                    kernel_snapshot(
                         {"flops": 800, "transcendentals": 40, "bytes_accessed": bad}
-                    ),
-                    local=True,
+                    )
                 )
         for bad in ("not base64", base64.b64encode(b"{}").decode()):
-            item = instruction()
-            item["backend_config"] = bad
+            snapshot = kernel_snapshot()
+            entry(snapshot)["instructions"][0]["backend_config"] = bad
             with self.assertRaises(ValueError):
-                pallas_cost(item, local=True)
+                kernel_cost(snapshot)
 
     def test_internal_communication_is_not_silently_ignored(self):
-        for item in (
-            instruction(has_communication=True),
-            instruction(
+        for snapshot in (
+            kernel_snapshot(has_communication=True),
+            kernel_snapshot(
                 {
                     "flops": 1,
                     "transcendentals": 0,
@@ -77,21 +89,10 @@ class PallasCostTest(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(ValueError, "communication"):
-                pallas_cost(item, local=True)
+                kernel_cost(snapshot)
 
     def test_three_roofline_limits_and_device_accounting(self):
-        snapshot = {
-            "hlo": {
-                "entry_computation_id": "main",
-                "computations": [
-                    {
-                        "id": "main",
-                        "root_id": "attention",
-                        "instructions": [instruction()],
-                    }
-                ],
-            }
-        }
+        snapshot = kernel_snapshot()
         for rate, expected in ((1e9, 800), (1e7, 4000)):
             config = scenario()
             config["transcendentals_per_second"] = rate
@@ -114,20 +115,8 @@ class PallasCostTest(unittest.TestCase):
         )
 
     def test_missing_estimate_retains_dependency_and_gap(self):
-        item = instruction()
-        del item["backend_config"]
-        snapshot = {
-            "hlo": {
-                "entry_computation_id": "main",
-                "computations": [
-                    {
-                        "id": "main",
-                        "root_id": "attention",
-                        "instructions": [item],
-                    }
-                ],
-            }
-        }
+        snapshot = kernel_snapshot()
+        del entry(snapshot)["instructions"][0]["backend_config"]
         model = Workload(snapshot, (0,), scenario(), network())
         events = model.lower()
         self.assertEqual(len(model.gaps), 1)

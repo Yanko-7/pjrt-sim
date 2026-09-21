@@ -17,11 +17,11 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/status/status_macros.h"
 #include "absl/strings/str_cat.h"
-#include "google/protobuf/util/json_util.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/literal_util.h"
+#include "xla/pjrt/sim/hlo_utils.h"
 #include "xla/primitive_util.h"
 #include "xla/service/hlo_cost_analysis.h"
 #include "xla/shape_util.h"
@@ -70,16 +70,6 @@ bool HasOnlyArrays(const Shape& shape) {
   return shape.IsArray() && shape.is_static();
 }
 
-bool IsShardingAnnotation(const HloInstruction& instruction) {
-  if (instruction.opcode() != HloOpcode::kCustomCall) return false;
-  const auto& target = instruction.custom_call_target();
-  return target == "Sharding" || target == "SPMDFullToShardShape" ||
-         target == "SPMDShardToFullShape" ||
-         target == "xla.sdy.FuncResultSharding" ||
-         target == "xla.sdy.GlobalToLocalShape" ||
-         target == "xla.sdy.LocalToGlobalShape";
-}
-
 WorkEstimate Estimate(const HloComputation& computation,
                       const HloCostAnalysis& analysis) {
   WorkEstimate work;
@@ -115,58 +105,12 @@ WorkEstimate Estimate(const HloComputation& computation,
 
 }  // namespace
 
-absl::StatusOr<WorkEstimate> PrepareForSimulation(HloModule& module,
-                                                  bool capture_program) {
+absl::StatusOr<WorkEstimate> PrepareForSimulation(HloModule& module) {
   HloCostAnalysis analysis([](const Shape& shape) {
     return ShapeUtil::ByteSizeOf(shape, sizeof(void*));
   });
   ABSL_RETURN_IF_ERROR(module.entry_computation()->Accept(&analysis));
   WorkEstimate estimate = Estimate(*module.entry_computation(), analysis);
-  if (capture_program) {
-    std::string hlo;
-    google::protobuf::util::JsonPrintOptions options;
-    options.preserve_proto_field_names = true;
-    ABSL_RETURN_IF_ERROR(google::protobuf::util::MessageToJsonString(
-        module.ToProto(), &hlo, options));
-    estimate.program_json =
-        absl::StrCat("{\"schema_version\":1,\"hlo\":", hlo, ",\"costs\":{");
-    bool first = true;
-    for (const HloComputation* computation :
-         module.MakeComputationPostOrder()) {
-      for (const HloInstruction* instruction : computation->instructions()) {
-        absl::StrAppend(
-            &estimate.program_json, first ? "" : ",", "\"",
-            instruction->unique_id(), "\":{\"dot_flops\":",
-            instruction->opcode() == HloOpcode::kDot
-                ? std::max<int64_t>(0, analysis.flop_count(*instruction))
-                : 0,
-            ",\"logical_bytes\":",
-            std::max<int64_t>(0, analysis.bytes_accessed(*instruction)));
-        const HloOpcode opcode = instruction->opcode();
-        if (opcode == HloOpcode::kAllReduce ||
-            opcode == HloOpcode::kAllGather ||
-            opcode == HloOpcode::kReduceScatter ||
-            opcode == HloOpcode::kAllToAll) {
-          // Normalize compact XLA device lists for the standalone replay
-          // reader.
-          absl::StrAppend(&estimate.program_json, ",\"collective_groups\":[");
-          bool first_group = true;
-          for (const ReplicaGroup& group : instruction->replica_groups()) {
-            absl::StrAppend(&estimate.program_json, first_group ? "[" : ",[");
-            for (int i = 0; i < group.replica_ids_size(); ++i)
-              absl::StrAppend(&estimate.program_json, i ? "," : "",
-                              group.replica_ids(i));
-            absl::StrAppend(&estimate.program_json, "]");
-            first_group = false;
-          }
-          absl::StrAppend(&estimate.program_json, "]");
-        }
-        absl::StrAppend(&estimate.program_json, "}");
-        first = false;
-      }
-    }
-    estimate.program_json += "}}";
-  }
   for (HloComputation* computation : module.MakeComputationPostOrder()) {
     for (HloInstruction* instruction :
          computation->MakeInstructionPostOrder()) {

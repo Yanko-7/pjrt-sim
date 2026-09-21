@@ -32,6 +32,9 @@ ENTRY main {
   EXPECT_EQ(node.transcendentals, 32768);
   EXPECT_EQ(node.bytes, 262144);
   EXPECT_EQ(node.cost_source, "pallas_cost_estimate");
+  EXPECT_EQ(plan.kernel_flops, node.flops);
+  EXPECT_EQ(plan.kernel_transcendentals, node.transcendentals);
+  EXPECT_EQ(plan.kernel_bytes, node.bytes);
 }
 
 TEST(ExecutionPlanTest, PallasReplicatedCostsAreNotDividedByDeviceCount) {
@@ -79,6 +82,8 @@ ENTRY main {
   double flops = 0;
   for (const PlanNode& node : plan.nodes) flops += node.flops;
   EXPECT_EQ(flops, 1600);
+  EXPECT_EQ(plan.kernel_flops, 1600);
+  EXPECT_EQ(plan.kernel_bytes, 32);
 }
 
 TEST(ExecutionPlanTest, MalformedOrCommunicatingPallasStaysUnknown) {

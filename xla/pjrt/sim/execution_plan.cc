@@ -15,6 +15,7 @@
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/pjrt/sim/hlo_utils.h"
 #include "xla/pjrt/sim/pallas_cost.h"
 #include "xla/shape_util.h"
 
@@ -29,16 +30,6 @@ bool Local(const HloInstruction* instruction) {
   if (instruction->opcode() != HloOpcode::kCustomCall) return false;
   return instruction->custom_call_target() == "xla.sdy.GlobalToLocalShape" ||
          instruction->custom_call_target() == "SPMDFullToShardShape";
-}
-
-bool Annotation(const HloInstruction& instruction) {
-  if (instruction.opcode() != HloOpcode::kCustomCall) return false;
-  const std::string& target = instruction.custom_call_target();
-  return target == "Sharding" || target == "SPMDFullToShardShape" ||
-         target == "SPMDShardToFullShape" ||
-         target == "xla.sdy.FuncResultSharding" ||
-         target == "xla.sdy.GlobalToLocalShape" ||
-         target == "xla.sdy.LocalToGlobalShape";
 }
 
 absl::StatusOr<std::vector<int64_t>> Tiles(const HloInstruction& instruction,
@@ -122,8 +113,8 @@ absl::Status EstimateNode(const HloInstruction& instruction, int64_t devices,
       opcode == HloOpcode::kPartitionId || opcode == HloOpcode::kReplicaId ||
       opcode == HloOpcode::kTuple || opcode == HloOpcode::kGetTupleElement ||
       opcode == HloOpcode::kBitcast || opcode == HloOpcode::kReshape ||
-      Annotation(instruction)) {
-    if (Annotation(instruction) &&
+      IsShardingAnnotation(instruction)) {
+    if (IsShardingAnnotation(instruction) &&
         instruction.custom_call_target() == "Sharding" &&
         instruction.operand_count()) {
       ABSL_ASSIGN_OR_RETURN(auto source,
@@ -209,11 +200,12 @@ absl::Status EstimateNode(const HloInstruction& instruction, int64_t devices,
                                         ? instruction.custom_call_target()
                                         : HloOpcodeString(opcode));
   }
-  ABSL_ASSIGN_OR_RETURN(node.bytes, Bytes(instruction, devices, local));
+  ABSL_ASSIGN_OR_RETURN(node.write_bytes, Bytes(instruction, devices, local));
   for (const HloInstruction* operand : instruction.operands()) {
     ABSL_ASSIGN_OR_RETURN(double bytes, Bytes(*operand, devices, local));
-    node.bytes += bytes;
+    node.read_bytes += bytes;
   }
+  node.bytes = node.read_bytes + node.write_bytes;
   node.kind = PlanNode::Kind::kCompute;
   return absl::OkStatus();
 }
@@ -223,15 +215,20 @@ class Builder {
   explicit Builder(int64_t devices) : devices_(devices) {}
 
   int Computation(const HloComputation& computation, bool local,
-                  const std::vector<int>& arguments) {
+                  const std::vector<int>& arguments, int call_gate = -1) {
     std::map<const HloInstruction*, int> nodes;
     for (const HloInstruction* instruction :
          computation.MakeInstructionPostOrder()) {
       PlanNode node;
       node.name = instruction->name();
+      node.hlo_id = instruction->unique_id();
+      node.opcode = HloOpcodeString(instruction->opcode());
+      node.dtype = PrimitiveType_Name(instruction->shape().element_type());
       node.framework_op = instruction->metadata().op_name();
       for (const HloInstruction* operand : instruction->operands())
         node.dependencies.push_back(nodes.at(operand));
+      // Calls also gate independent callee work, including zero-argument calls.
+      if (call_gate >= 0) node.dependencies.push_back(call_gate);
       for (const HloInstruction* predecessor :
            instruction->control_predecessors())
         node.dependencies.push_back(nodes.at(predecessor));
@@ -246,16 +243,20 @@ class Builder {
                                   instruction->operands().end(), Local));
         // Control predecessors gate the call as well as its return.
         std::vector<int> inputs = node.dependencies;
-        const int gate = Add(node);
-        for (int& input : inputs) input = gate;
+        PlanNode gate_node = node;
+        // Scheduling-only node, not another HLO occurrence.
+        gate_node.hlo_id = -1;
+        const int gate = Add(std::move(gate_node));
         node.dependencies.push_back(
-            Computation(*instruction->to_apply(), child_local, inputs));
+            Computation(*instruction->to_apply(), child_local, inputs, gate));
       } else {
         absl::Status status =
             EstimateNode(*instruction, devices_, local, node, reduce);
         if (!status.ok()) {
           node.cost_gap = std::string(status.message());
           node.bytes = node.flops = node.transcendentals = 0;
+          node.read_bytes = node.write_bytes = 0;
+          node.transfers.clear();
           node.cost_source.clear();
           node.kind = PlanNode::Kind::kBarrier;
           reduce = false;
@@ -266,6 +267,7 @@ class Builder {
       if (reduce) {
         PlanNode collective;
         collective.name = "tensor-parallel all-reduce";
+        collective.inferred = true;
         collective.framework_op = instruction->metadata().op_name();
         collective.kind = PlanNode::Kind::kAllReduce;
         collective.dependencies = {result};
@@ -290,6 +292,16 @@ class Builder {
 
  private:
   int Add(PlanNode node) {
+    // Canonical dependency order makes snapshots stable across process reloads.
+    std::sort(node.dependencies.begin(), node.dependencies.end());
+    node.dependencies.erase(
+        std::unique(node.dependencies.begin(), node.dependencies.end()),
+        node.dependencies.end());
+    if (node.cost_source == "pallas_cost_estimate") {
+      plan_.kernel_flops += node.flops;
+      plan_.kernel_transcendentals += node.transcendentals;
+      plan_.kernel_bytes += node.bytes;
+    }
     plan_.nodes.push_back(std::move(node));
     return plan_.nodes.size() - 1;
   }

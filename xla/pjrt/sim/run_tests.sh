@@ -13,7 +13,7 @@ bazel test -c opt //xla/pjrt/sim:hlo_model_test \
   //xla/pjrt/sim:profiler_test //xla/pjrt/sim:instrumentation_test \
   //xla/pjrt/sim:runtime_test //xla/pjrt/sim:execution_plan_test \
   //xla/pjrt/sim:virtual_storage_test \
-  //xla/pjrt/sim:pjrt_sim_plugin.so //xla/pjrt/sim:xplane_descriptor --jobs=8 --test_output=errors --noannounce_rc
+  //xla/pjrt/sim:plan_export //xla/pjrt/sim:pjrt_sim_plugin.so //xla/pjrt/sim:xplane_descriptor --jobs=8 --test_output=errors --noannounce_rc
 
 unset PJRT_SIM_PROFILE_PYTHON PJRT_SIM_PROFILE_HELPER
 export JAX_PLATFORMS=tpu
@@ -23,6 +23,7 @@ export PJRT_SIM_DEVICE_COUNT=1
 unset PJRT_SIM_TRACE PJRT_SIM_MAX_MATERIALIZED_BYTES
 
 "$sim_python" xla/pjrt/sim/virtual_storage_test.py -v
+"$sim_python" xla/pjrt/sim/program_snapshot_test.py -v
 "$sim_python" xla/pjrt/sim/online_runtime_test.py -v
 "$sim_python" xla/pjrt/sim/runtime_sensitivity_test.py -v
 "$sim_python" xla/pjrt/sim/smoke_test.py -v
@@ -32,6 +33,7 @@ JAX_PLATFORMS=cpu "$sim_python" xla/pjrt/sim/pallas_lowering_test.py -v
 "$sim_python" xla/pjrt/sim/report_test.py -v
 "$sim_python" xla/pjrt/sim/profile_report_test.py -v
 "$sim_python" xla/pjrt/sim/virtual_clock_test.py -v
+"$sim_python" xla/pjrt/sim/execution_plan_test.py -v
 "$sim_python" xla/pjrt/sim/replay_test.py -v
 "$sim_python" xla/pjrt/sim/device_load_test.py -v
 "$sim_python" xla/pjrt/sim/xprof_export_test.py -v

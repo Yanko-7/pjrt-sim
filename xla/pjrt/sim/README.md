@@ -193,7 +193,8 @@ distributed initialization is not supported.
 | File | Responsibility |
 | --- | --- |
 | `plugin.cc` | PJRT entry point, device identity, MLIR/HLO import, CPU compilation |
-| `hlo_model.cc` | Capture original logical work and apply numerical substitutions |
+| `hlo_model.cc` | Estimate original aggregate work and apply numerical substitutions |
+| `program_snapshot.cc`, `plan_export.cc` | Export original HLO and canonical plans; replan offline |
 | `instrumentation.cc` | Bind buffer producers, gate PJRT readiness and track accepted calls |
 | `execution_plan.cc`, `runtime.cc` | Original-HLO plans, resource reservations and live completion |
 | `profiler.cc`, `profiler_api.cc` | Concurrent capture sessions and PJRT profiler extension |
@@ -263,8 +264,9 @@ global virtual clock, and its request latency is not a calibrated TPU prediction
 
 ### Declared Pallas costs
 
-The online plan and Python replay read
-`custom_call_config.cost_estimate` from a `tpu_custom_call` backend config.
+The C++ planner reads `custom_call_config.cost_estimate` from a
+`tpu_custom_call` backend config. Both the online runtime and Python replay
+consume that plan; Python does not maintain a separate Pallas cost parser.
 JAX 0.11.1 TPU FlashAttention supplies `flops`, `transcendentals`, and
 `bytes_accessed`. Costs apply once per local invocation, including each static
 call site; they are never divided by TP. Supported scopes are one device, a
@@ -454,6 +456,25 @@ events or scheduling.
 
 ## Virtual replay
 
+New snapshots (schema version 2) contain both the original HLO and a versioned
+execution plan with HLO IDs, dtypes, read/write byte counts, and coverage gaps.
+Replaying that plan on the same number of devices needs only Python. Device
+binding, hardware rates, and communication routes remain outside the plan.
+
+For older snapshots or a different device count, build the native planner once:
+
+```sh
+bazel build -c opt //xla/pjrt/sim:plan_export
+```
+
+The Python tools locate it under `bazel-bin` automatically. Outside this checkout,
+set `PJRT_SIM_PLAN_EXPORT=/path/to/plan_export`. You can also export a new snapshot
+explicitly and transfer it to a machine without the native tool:
+
+```sh
+bazel-bin/xla/pjrt/sim/plan_export 4 < original.program.json > replanned.program.json
+```
+
 `replay.py` joins one process's execution log and original program snapshots to
 its XProf capture using correlation IDs. It reconstructs buffer dependencies and
 host thread submission order, then schedules a DAG in integer virtual nanoseconds.
@@ -518,11 +539,14 @@ The implementation modules are:
 - `communication.py`: explicit directed routes, alpha-plus-bytes/bandwidth transfers,
   store-and-forward hops and ring all-reduce/all-gather/reduce-scatter with round
   barriers. Every collective waits for all participants, including late arrivals.
-- `workload.py`: static call expansion, local shard-map scopes, uniform identity
-  sharding and ordinary 2D tensor-parallel dots. Output-dimension partitioning uses
-  local compute; matching full-group contracting partitions add an all-reduce.
-  Post-partition snapshots use local sizes and explicit full-group collectives,
-  all-to-all and permute transfers. Other operations receive logical memory traffic estimates when sharding is known.
+- `execution_plan.cc`: shared HLO interpretation for online and offline work,
+  including static calls, local scopes, uniform identity sharding, 2D dots,
+  inferred all-reduce, explicit collectives, logical memory traffic, and Pallas.
+- `execution_plan.py`: read the embedded plan or invoke the native planner when
+  the requested device count differs or a legacy snapshot has no plan.
+- `workload.py`: apply scenario rates to per-device plan costs and expand
+  communication through the configured routes. Hardware rates and routing
+  remain adjustable without rebuilding the plan.
 - `xprof_export.py`: canonical XSpace serialization and simulated resource tracks.
 - `replay.py`: capture validation, per-device execution order, conservative buffer
   readiness, H2D/D2H/copy costs and configurable host submission/launch costs.
@@ -571,7 +595,10 @@ python xla/pjrt/sim/device_load.py /tmp/my-sim-run.123.program10.json \
 This describes **one invocation**, with the same supported sharding rules and
 communication scenario as replay. `--scenario` selects another configuration.
 The snapshot is the plugin's JSON wrapper around original HLO; raw HLO text is
-not accepted. The device count must match the program's intended SPMD mesh.
+not accepted. Changing `--devices` replans the original HLO rather than scaling
+recorded costs. Sharding incompatible with the requested mesh remains an explicit cost
+gap. For `per_partition` snapshots, shapes are already local and remain local;
+replanning does not reconstruct global shapes or rerun SPMD partitioning.
 
 Logical traffic is the sum of represented operand reads and result writes; it
 is not allocated memory, peak live storage or measured HBM traffic. Fusion, cache

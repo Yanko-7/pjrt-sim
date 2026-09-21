@@ -36,7 +36,7 @@ struct Registry {
   std::unordered_map<PJRT_Buffer*, Completion> completions;
   std::unordered_map<PJRT_Client*, std::shared_ptr<SimRuntime>> runtimes;
   uint64_t next_buffer_id = 1;
-  std::unordered_map<PJRT_LoadedExecutable*, WorkEstimate> work;
+  std::unordered_map<PJRT_LoadedExecutable*, ExecutableWork> work;
   std::ofstream trace;
   uint64_t sequence = 0;
   uint64_t next_program_id = 1;
@@ -374,7 +374,7 @@ PJRT_Error* Execute(PJRT_LoadedExecutable_Execute_Args* args) {
       "PJRT_LoadedExecutable_Execute_Args",
       PJRT_LoadedExecutable_Execute_Args_STRUCT_SIZE, args->struct_size));
   ProfileCall profile("PJRT Execute submit", args->executable->get()->name());
-  WorkEstimate work;
+  ExecutableWork work;
   {
     std::lock_guard<std::mutex> lock(State().mutex);
     work = State().work.at(args->executable);
@@ -458,39 +458,32 @@ PJRT_Error* Execute(PJRT_LoadedExecutable_Execute_Args* args) {
   profile.activity().SetLinks(std::move(inputs), std::move(outputs));
   const auto it = State().work.find(args->executable);
   if (it != State().work.end()) {
-    const WorkEstimate& work = it->second;
+    const ExecutableWork& work = it->second;
     profile.activity().SetProgram(work.program_id, args->num_devices,
                                   work.num_replicas);
   }
   if (it != State().work.end() && State().trace.is_open()) {
-    const WorkEstimate& work = it->second;
-    double kernel_flops = 0, kernel_transcendentals = 0, kernel_bytes = 0;
-    for (const PlanNode& node : work.plan->nodes) {
-      if (node.cost_source != "pallas_cost_estimate") continue;
-      kernel_flops += node.flops;
-      kernel_transcendentals += node.transcendentals;
-      kernel_bytes += node.bytes;
-    }
-    State().trace << std::setprecision(17)
-                  << "{\"sequence\":" << State().sequence++ << ",\"name\":"
-                  << std::quoted(std::string(args->executable->get()->name()))
-                  << ",\"num_devices\":" << args->num_devices
-                  << ",\"num_replicas\":" << work.num_replicas
-                  << ",\"num_partitions\":" << work.num_partitions
-                  << ",\"program_id\":" << work.program_id
-                  << ",\"correlation_id\":"
-                  << profile.activity().correlation_id() << ",\"work_scope\":"
-                  << std::quoted(work.partitioned ? "per_partition"
-                                                  : "pre_partition")
-                  << ",\"dot_flops\":" << work.dot_flops
-                  << ",\"logical_bytes\":" << work.logical_bytes
-                  << ",\"substituted_ops\":" << work.substituted_ops
-                  << ",\"unmodeled_ops\":" << work.unmodeled_ops
-                  << ",\"plan_cost_gaps\":" << work.plan->cost_gaps
-                  << ",\"kernel_cost_scope\":\"per_device\""
-                  << ",\"kernel_flops\":" << kernel_flops
-                  << ",\"kernel_transcendentals\":" << kernel_transcendentals
-                  << ",\"kernel_bytes_accessed\":" << kernel_bytes << "}\n";
+    const ExecutableWork& work = it->second;
+    State().trace
+        << std::setprecision(17) << "{\"sequence\":" << State().sequence++
+        << ",\"name\":"
+        << std::quoted(std::string(args->executable->get()->name()))
+        << ",\"num_devices\":" << args->num_devices
+        << ",\"num_replicas\":" << work.num_replicas
+        << ",\"num_partitions\":" << work.num_partitions
+        << ",\"program_id\":" << work.program_id
+        << ",\"correlation_id\":" << profile.activity().correlation_id()
+        << ",\"work_scope\":"
+        << std::quoted(work.partitioned ? "per_partition" : "pre_partition")
+        << ",\"dot_flops\":" << work.estimate.dot_flops
+        << ",\"logical_bytes\":" << work.estimate.logical_bytes
+        << ",\"substituted_ops\":" << work.estimate.substituted_ops
+        << ",\"unmodeled_ops\":" << work.estimate.unmodeled_ops
+        << ",\"plan_cost_gaps\":" << work.plan->cost_gaps
+        << ",\"kernel_cost_scope\":\"per_device\""
+        << ",\"kernel_flops\":" << work.plan->kernel_flops
+        << ",\"kernel_transcendentals\":" << work.plan->kernel_transcendentals
+        << ",\"kernel_bytes_accessed\":" << work.plan->kernel_bytes << "}\n";
     State().trace.flush();
     if (!State().trace) LOG(ERROR) << "Failed to write PJRT_SIM_TRACE";
   }
@@ -512,21 +505,21 @@ int64_t MaxMaterializedBytes(PJRT_Client* client) {
   return runtime ? runtime->max_materialized_bytes() : 0;
 }
 
-void RegisterWork(PJRT_LoadedExecutable* executable, WorkEstimate work) {
+void RegisterWork(PJRT_LoadedExecutable* executable, ExecutableWork work,
+                  const std::string& program_json) {
   std::lock_guard<std::mutex> lock(State().mutex);
   work.program_id = State().next_program_id++;
-  if (!work.program_json.empty()) {
+  if (!program_json.empty()) {
     const char* prefix = std::getenv("PJRT_SIM_TRACE");
     if (prefix) {
       std::ofstream program(
           std::string(prefix) + "." +
           std::to_string(tsl::Env::Default()->GetProcessId()) + ".program" +
           std::to_string(work.program_id) + ".json");
-      program << work.program_json << '\n';
+      program << program_json << '\n';
       program.flush();
       if (!program) LOG(ERROR) << "Failed to write simulator program snapshot";
     }
-    work.program_json.clear();
   }
   State().work.emplace(executable, std::move(work));
 }

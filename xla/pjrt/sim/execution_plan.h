@@ -25,6 +25,11 @@ struct PlanNode {
     kReduceScatter,
     kTransfers
   };
+  // -1 identifies scheduling-only barriers and inferred communication.
+  int64_t hlo_id = -1;
+  std::string opcode;
+  std::string dtype;
+  bool inferred = false;
   std::string name;
   std::string framework_op;
   std::string cost_gap;
@@ -36,12 +41,18 @@ struct PlanNode {
   double flops = 0;
   double transcendentals = 0;
   double bytes = 0;
+  double read_bytes = 0;
+  double write_bytes = 0;
 };
 
 struct ExecutionPlan {
   std::vector<PlanNode> nodes;
   int root = -1;
   int64_t cost_gaps = 0;
+  // Per-device declared kernel totals, computed once while building the plan.
+  double kernel_flops = 0;
+  double kernel_transcendentals = 0;
+  double kernel_bytes = 0;
 };
 
 // Intentionally limited to uniform sharding and static calls. Unsupported work

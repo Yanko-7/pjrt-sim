@@ -15,6 +15,7 @@ limitations under the License.
 #include "gtest/gtest.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/parser/hlo_parser.h"
+#include "xla/pjrt/sim/program_snapshot.h"
 #include "tsl/platform/status_matchers.h"
 
 namespace xla::sim {
@@ -29,9 +30,12 @@ TEST(HloModelTest, CountsDotBeforeReplacingIt) {
       ROOT dot = bf16[2,4] dot(x,y), lhs_contracting_dims={1}, rhs_contracting_dims={0}
     }
   )"));
-  ASSERT_OK_AND_ASSIGN(WorkEstimate work, PrepareForSimulation(*module, true));
-  EXPECT_NE(work.program_json.find("\"opcode\":\"dot\""), std::string::npos);
-  EXPECT_NE(work.program_json.find("\"dot_flops\":48"), std::string::npos);
+  ASSERT_OK_AND_ASSIGN(std::string snapshot,
+                       CaptureProgramSnapshot(
+                           *module, BuildExecutionPlan(*module, 1), 1, false));
+  ASSERT_OK_AND_ASSIGN(WorkEstimate work, PrepareForSimulation(*module));
+  EXPECT_NE(snapshot.find("\"opcode\":\"dot\""), std::string::npos);
+  EXPECT_NE(snapshot.find("\"flops\":48"), std::string::npos);
   EXPECT_EQ(work.dot_flops, 48);
   EXPECT_EQ(work.substituted_ops, 1);
   EXPECT_EQ(module->entry_computation()->root_instruction()->opcode(),
@@ -48,7 +52,6 @@ TEST(HloModelTest, PreservesIntegerControlOperations) {
   )"));
   ASSERT_OK_AND_ASSIGN(WorkEstimate work, PrepareForSimulation(*module));
   EXPECT_EQ(work.substituted_ops, 0);
-  EXPECT_TRUE(work.program_json.empty());
   EXPECT_EQ(module->entry_computation()->root_instruction()->opcode(),
             HloOpcode::kAdd);
 }

@@ -50,6 +50,7 @@ xla_cc_test(
     srcs = ["hlo_model_test.cc"],
     deps = [
         ":hlo_model",
+        ":program_snapshot",
         ":runtime",
         "//xla/hlo/parser:hlo_parser",
         "//xla/hlo/ir:hlo",
@@ -83,8 +84,7 @@ cc_library(
     srcs = ["hlo_model.cc"],
     hdrs = ["hlo_model.h"],
     deps = [
-        ":execution_plan",
-        "@com_google_protobuf//:protobuf",
+        ":hlo_utils",
         "//xla:literal_util",
         "//xla:shape_util",
         "//xla/hlo/ir:hlo",
@@ -103,6 +103,7 @@ xla_cc_binary(
     deps = [
         "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
         ":hlo_model",
+        ":program_snapshot",
         ":virtual_storage",
         ":runtime",
         ":profiler",
@@ -136,6 +137,7 @@ cc_library(
     srcs = ["execution_plan.cc", "pallas_cost.cc"],
     hdrs = ["execution_plan.h", "pallas_cost.h"],
     deps = [
+        ":hlo_utils",
         "//xla:shape_util",
         "//xla/hlo/ir:hlo",
         "@com_google_protobuf//:protobuf",
@@ -238,5 +240,41 @@ cc_library(
         "//xla/service/spmd/shardy:shardy_xla_pass",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",
+    ],
+)
+
+cc_library(
+    name = "hlo_utils",
+    hdrs = ["hlo_utils.h"],
+    deps = ["//xla/hlo/ir:hlo"],
+)
+
+cc_library(
+    name = "program_snapshot",
+    srcs = ["program_snapshot.cc"],
+    hdrs = ["program_snapshot.h"],
+    deps = [
+        ":execution_plan",
+        "//xla/hlo/ir:hlo",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/strings",
+        "@com_google_protobuf//:protobuf",
+    ],
+)
+
+xla_cc_binary(
+    name = "plan_export",
+    srcs = ["plan_export.cc"],
+    deps = [
+        ":execution_plan",
+        ":program_snapshot",
+        "//xla/hlo/ir:hlo",
+        "//xla/hlo/parser:hlo_parser",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/strings",
+        "@com_google_protobuf//:protobuf",
     ],
 )

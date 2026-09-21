@@ -1,12 +1,12 @@
 """Analytic sharding and capture-to-virtual-time integration checks."""
 
-import copy
 import unittest
 
 from replay import build_replay
 from virtual_clock import Event, simulate, summarize
 from virtual_clock_test import network
-from workload import Workload, tile_shape
+from workload import Workload
+from plan_test_utils import entry, snapshot_from_hlo
 
 
 def scenario():
@@ -27,71 +27,40 @@ def scenario():
     }
 
 
-def sharding(tiles):
-    return {
-        "type": "OTHER",
-        "tile_assignment_dimensions": list(map(str, tiles)),
-        "iota_reshape_dims": ["2"],
-        "iota_transpose_perm": [0],
-    }
-
-
 def dot_program(contract=True):
-    def operand(id, shape, tiles, number):
-        return {
-            "id": id,
-            "name": id,
-            "opcode": "parameter",
-            "parameter_number": str(number),
-            "shape": {"element_type": "BF16", "dimensions": list(map(str, shape))},
-            "sharding": sharding(tiles) if tiles else {},
-        }
-
-    instructions = [
-        operand("x", (2, 4), (1, 2) if contract else None, 0),
-        operand("y", (4, 6), (2, 1) if contract else (1, 2), 1),
-        {
-            "id": "z",
-            "name": "dot",
-            "opcode": "dot",
-            "operand_ids": ["x", "y"],
-            "shape": {"element_type": "BF16", "dimensions": ["2", "6"]},
-            "sharding": {} if contract else sharding((1, 2)),
-            "dot_dimension_numbers": {
-                "lhs_contracting_dimensions": ["1"],
-                "rhs_contracting_dimensions": ["0"],
-            },
-        },
-    ]
-    return {
-        "hlo": {
-            "entry_computation_id": "main",
-            "computations": [
-                {"id": "main", "root_id": "z", "instructions": instructions}
-            ],
-        }
-    }
+    lhs = "devices=[1,2]0,1" if contract else "replicated"
+    rhs = "devices=[2,1]0,1" if contract else "devices=[1,2]0,1"
+    out = "replicated" if contract else "devices=[1,2]0,1"
+    return snapshot_from_hlo(
+        f"""
+HloModule dot_program
+ENTRY main {{
+  x = bf16[2,4] parameter(0), sharding={{{lhs}}}
+  y = bf16[4,6] parameter(1), sharding={{{rhs}}}
+  ROOT dot = bf16[2,6] dot(x,y), lhs_contracting_dims={{1}}, rhs_contracting_dims={{0}}, sharding={{{out}}}
+}}
+""",
+        2,
+    )
 
 
 class ReplayTest(unittest.TestCase):
     def test_partitioned_snapshot_has_local_work_and_explicit_collective(self):
-        snapshot = dot_program()
+        snapshot = snapshot_from_hlo("""
+HloModule local
+sum {
+  x = bf16[] parameter(0)
+  y = bf16[] parameter(1)
+  ROOT z = bf16[] add(x,y)
+}
+ENTRY main {
+  x = bf16[2,4] parameter(0)
+  y = bf16[4,6] parameter(1)
+  dot = bf16[2,6] dot(x,y), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  ROOT reduced = bf16[2,6] all-reduce(dot), replica_groups={{0,1}}, channel_id=1, to_apply=sum
+}
+""")
         snapshot["shape_scope"] = "per_partition"
-        main = snapshot["hlo"]["computations"][0]
-        for instruction in main["instructions"]:
-            instruction.pop("sharding", None)
-        main["instructions"].append(
-            {
-                "id": "reduce",
-                "name": "sum",
-                "opcode": "all-reduce",
-                "operand_ids": ["z"],
-                "channel_id": "1",
-                "shape": main["instructions"][-1]["shape"],
-            }
-        )
-        main["root_id"] = "reduce"
-        snapshot["costs"] = {"reduce": {"collective_groups": [[0, 1]]}}
         model = Workload(snapshot, (0, 1), scenario(), network())
         events = [Event(f"start:{d}", "start") for d in (0, 1)] + model.lower()
         self.assertEqual(model.gaps, [])
@@ -99,21 +68,14 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(summarize(simulate(events))["makespan_ns"], 122)
 
     def test_partitioned_permute_uses_logical_bytes(self):
-        snapshot = dot_program()
+        snapshot = snapshot_from_hlo("""
+HloModule permute
+ENTRY main {
+  x = bf16[2,4] parameter(0)
+  ROOT move = bf16[2,4] collective-permute(x), source_target_pairs={{0,1}}, channel_id=1
+}
+""")
         snapshot["shape_scope"] = "per_partition"
-        main = snapshot["hlo"]["computations"][0]
-        main["instructions"] = main["instructions"][:1] + [
-            {
-                "id": "permute",
-                "name": "move",
-                "opcode": "collective-permute",
-                "operand_ids": ["x"],
-                "channel_id": "1",
-                "shape": main["instructions"][0]["shape"],
-                "source_target_pairs": [{"target": "1"}],
-            }
-        ]
-        main["root_id"] = "permute"
         model = Workload(snapshot, (0, 1), scenario(), network())
         events = [Event(f"start:{d}", "start") for d in (0, 1)] + model.lower()
         self.assertEqual(model.gaps, [])
@@ -132,51 +94,34 @@ class ReplayTest(unittest.TestCase):
         events = [Event(f"start:{d}", "start") for d in (0, 1)] + model.lower()
         self.assertEqual(model.gaps, [])
         self.assertEqual(model.inferred_collectives, 0)
-        # Replicated lhs 16 bytes, local rhs 24, local output 12.
         self.assertEqual(summarize(simulate(events))["makespan_ns"], 52)
 
     def test_unknown_sharding_and_opaque_work_stay_explicit(self):
         snapshot = dot_program()
-        del snapshot["hlo"]["computations"][0]["instructions"][-1]["sharding"]
+        del entry(snapshot)["instructions"][-1]["sharding"]
         model = Workload(snapshot, (0, 1), scenario(), network())
         model.lower()
         self.assertEqual(model.inferred_collectives, 0)
         self.assertIn("unknown sharding", model.gaps[0]["reason"])
-        bad = sharding((1, 2))
-        bad["iota_transpose_perm"] = [1, 0]
-        with self.assertRaises(ValueError):
-            tile_shape(bad, 2, 2)
 
     def test_shared_callee_is_instantiated_per_call(self):
-        snapshot = dot_program(False)
-        main = snapshot["hlo"]["computations"][0]
-        main["id"] = "callee"
-        call = {
-            "id": "a",
-            "name": "a",
-            "opcode": "call",
-            "operand_ids": ["x", "y"],
-            "called_computation_ids": ["callee"],
-            "shape": main["instructions"][-1]["shape"],
-        }
-        second = {**call, "id": "b", "name": "b"}
-        snapshot["hlo"]["computations"].append(
-            {
-                "id": "main",
-                "root_id": "root",
-                "instructions": [
-                    *copy.deepcopy(main["instructions"][:2]),
-                    call,
-                    second,
-                    {
-                        "id": "root",
-                        "name": "root",
-                        "opcode": "tuple",
-                        "operand_ids": ["a", "b"],
-                        "shape": {"element_type": "TUPLE"},
-                    },
-                ],
-            }
+        snapshot = snapshot_from_hlo(
+            """
+HloModule calls
+callee {
+  x = bf16[2,4] parameter(0), sharding={replicated}
+  y = bf16[4,6] parameter(1), sharding={devices=[1,2]0,1}
+  ROOT dot = bf16[2,6] dot(x,y), lhs_contracting_dims={1}, rhs_contracting_dims={0}, sharding={devices=[1,2]0,1}
+}
+ENTRY main {
+  x = bf16[2,4] parameter(0), sharding={replicated}
+  y = bf16[4,6] parameter(1), sharding={devices=[1,2]0,1}
+  a = bf16[2,6] call(x,y), to_apply=callee
+  b = bf16[2,6] call(x,y), to_apply=callee
+  ROOT result = (bf16[2,6], bf16[2,6]) tuple(a,b)
+}
+""",
+            2,
         )
         model = Workload(snapshot, (0, 1), scenario(), network())
         events = model.lower()

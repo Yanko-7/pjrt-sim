@@ -38,6 +38,7 @@ limitations under the License.
 #include "xla/pjrt/sim/instrumentation.h"
 #include "xla/pjrt/sim/partitioning.h"
 #include "xla/pjrt/sim/profiler.h"
+#include "xla/pjrt/sim/program_snapshot.h"
 #include "xla/pjrt/sim/virtual_storage.h"
 
 namespace xla::sim {
@@ -140,7 +141,8 @@ PJRT_Error* Load(PJRT_Client_Load_Args*) {
 }
 
 absl::StatusOr<std::unique_ptr<PjRtLoadedExecutable>> CompileProgram(
-    PJRT_Client_Compile_Args* args, WorkEstimate& work) {
+    PJRT_Client_Compile_Args* args, ExecutableWork& work,
+    std::string& program_json) {
   CompileOptionsProto proto;
   if (!proto.ParseFromArray(args->compile_options,
                             args->compile_options_size)) {
@@ -188,13 +190,13 @@ absl::StatusOr<std::unique_ptr<PjRtLoadedExecutable>> CompileProgram(
   }
   auto plan = std::make_shared<ExecutionPlan>(
       BuildExecutionPlan(*module, build.num_partitions(), partitioned));
-  ABSL_ASSIGN_OR_RETURN(
-      work,
-      PrepareForSimulation(*module, std::getenv("PJRT_SIM_TRACE") != nullptr));
-  work.partitioned = partitioned;
-  if (partitioned && !work.program_json.empty()) {
-    work.program_json.insert(1, "\"shape_scope\":\"per_partition\",");
+  if (std::getenv("PJRT_SIM_TRACE") != nullptr) {
+    ABSL_ASSIGN_OR_RETURN(
+        program_json, CaptureProgramSnapshot(
+                          *module, *plan, build.num_partitions(), partitioned));
   }
+  ABSL_ASSIGN_OR_RETURN(work.estimate, PrepareForSimulation(*module));
+  work.partitioned = partitioned;
   work.num_replicas = build.num_replicas();
   work.plan = std::move(plan);
   work.num_partitions = build.num_partitions();
@@ -213,15 +215,16 @@ PJRT_Error* Compile(PJRT_Client_Compile_Args* args) {
       args->struct_size));
   PJRT_RETURN_IF_ERROR(pjrt::ActualStructSizeIsGreaterOrEqual(
       "PJRT_Program", PJRT_Program_STRUCT_SIZE, args->program->struct_size));
-  WorkEstimate work;
-  auto compiled = CompileProgram(args, work);
+  ExecutableWork work;
+  std::string program_json;
+  auto compiled = CompileProgram(args, work, program_json);
   if (!compiled.ok()) {
     profile.activity().Finish(compiled.status());
     return pjrt::StatusToPjRtError(compiled.status());
   }
   args->executable =
       new PJRT_LoadedExecutable(std::move(*compiled), args->client);
-  RegisterWork(args->executable, work);
+  RegisterWork(args->executable, std::move(work), program_json);
   return nullptr;
 }
 
