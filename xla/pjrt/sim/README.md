@@ -1,5 +1,7 @@
 # TPU simulator: SGLang-Jax execution backend
 
+中文文档站（本地）：参见 [启动与维护说明](docs-site/README.md)。
+
 This PJRT plugin runs SGLang-Jax without TPU hardware or libtpu, including
 multi-device tensor parallelism with overlap scheduling. It reports simulated
 TPU7x chiplets and uses XLA's CPU runtime for buffers, transfers, collectives,
