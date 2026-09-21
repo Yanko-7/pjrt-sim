@@ -30,9 +30,9 @@ limitations under the License.
 #include "xla/pjrt/c/pjrt_c_api_layouts_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_status_utils.h"
 #include "xla/pjrt/c/pjrt_c_api_wrapper_impl.h"
-#include "xla/pjrt/cpu/cpu_client.h"
 #include "xla/pjrt/mlir_to_hlo.h"
 #include "xla/pjrt/plugin/xla_cpu/cpu_client_options.h"
+#include "xla/pjrt/plugin/xla_cpu/xla_cpu_pjrt_client.h"
 #include "xla/pjrt/proto/compile_options.pb.h"
 #include "xla/pjrt/sim/hlo_model.h"
 #include "xla/pjrt/sim/instrumentation.h"
@@ -77,7 +77,7 @@ PJRT_Error* Create(PJRT_Client_Create_Args* args) {
         absl::InvalidArgumentError("Simulator does not accept client options"));
   }
   PJRT_ASSIGN_OR_RETURN(std::unique_ptr<PjRtClient> client,
-                        GetPjRtCpuClient(options));
+                        GetXlaPjrtCpuClient(options));
   args->client = pjrt::CreateWrapperClient(Api(), std::move(client));
   RegisterRuntime(args->client, runtime_config);
   // JAX mesh construction needs unique (coords, core_on_chip) pairs.
